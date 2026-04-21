@@ -1,0 +1,6 @@
+node_modules
+.env
+db/cafe.db
+db/cafe.db-shm
+db/cafe.db-wal
+*.bat

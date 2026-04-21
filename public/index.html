@@ -1,0 +1,353 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>The Site – PC/PS Gaming</title>
+  <link rel="stylesheet" href="/css/styles.css" />
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800;900&display=swap" rel="stylesheet" />
+</head>
+<body>
+
+<!-- ═══════════════════════════════════════════════════════════════════════════
+     AUTH VIEWS
+════════════════════════════════════════════════════════════════════════════ -->
+<div id="auth-screen" class="auth-screen">
+  <div class="auth-brand">
+    <div class="brand-logo"><img src="/logo.png" alt="The Site" style="width:100%;height:100%;object-fit:cover;display:block;"></div>
+    <h1 class="brand-name">The Site</h1>
+    <p class="brand-sub">PC / PS Gaming</p>
+  </div>
+
+  <!-- Login -->
+  <div id="view-login" class="auth-card active">
+    <h2>Welcome Back</h2>
+    <p class="auth-hint">Sign in to your account</p>
+    <form id="form-login" onsubmit="handleLogin(event)">
+      <div class="form-group">
+        <label>Username</label>
+        <input type="text" id="login-username" placeholder="Enter username" autocomplete="username" required />
+      </div>
+      <div class="form-group">
+        <label>Password</label>
+        <div class="input-eye">
+          <input type="password" id="login-password" placeholder="Enter password" autocomplete="current-password" required />
+          <button type="button" class="eye-btn" onclick="togglePwd('login-password', this)">👁</button>
+        </div>
+      </div>
+      <div id="login-error" class="form-error hidden"></div>
+      <button type="submit" class="btn-primary full-width" id="login-btn">Sign In</button>
+    </form>
+    <p class="auth-switch">Don't have an account? <a href="#" onclick="showAuthView('register')">Register</a></p>
+  </div>
+
+  <!-- Register -->
+  <div id="view-register" class="auth-card">
+    <h2>Create Account</h2>
+    <p class="auth-hint">An OTP will be sent to the owner for approval</p>
+    <form id="form-register" onsubmit="handleRegister(event)">
+      <div class="form-group">
+        <label>Username</label>
+        <input type="text" id="reg-username" placeholder="Choose a username" required />
+      </div>
+      <div class="form-group">
+        <label>Password</label>
+        <div class="input-eye">
+          <input type="password" id="reg-password" placeholder="Min 6 characters" required />
+          <button type="button" class="eye-btn" onclick="togglePwd('reg-password', this)">👁</button>
+        </div>
+      </div>
+      <div class="form-group">
+        <label>Account Type</label>
+        <select id="reg-role">
+          <option value="employee">Employee</option>
+          <option value="owner">Owner</option>
+        </select>
+      </div>
+      <div id="reg-error" class="form-error hidden"></div>
+      <button type="submit" class="btn-primary full-width" id="reg-btn">Request Registration</button>
+    </form>
+    <p class="auth-switch">Already have an account? <a href="#" onclick="showAuthView('login')">Sign In</a></p>
+  </div>
+
+  <!-- OTP Verify -->
+  <div id="view-otp" class="auth-card">
+    <h2>Enter OTP</h2>
+    <p class="auth-hint">Ask the owner to share the OTP sent to their email</p>
+    <form id="form-otp" onsubmit="handleVerifyOTP(event)">
+      <div class="form-group">
+        <label>6-Digit OTP</label>
+        <input type="text" id="otp-input" placeholder="_ _ _ _ _ _" maxlength="6"
+               pattern="[0-9]{6}" inputmode="numeric" class="otp-input" required />
+      </div>
+      <div id="otp-error" class="form-error hidden"></div>
+      <button type="submit" class="btn-primary full-width" id="otp-btn">Verify & Create Account</button>
+    </form>
+    <p class="auth-switch"><a href="#" onclick="showAuthView('register')">← Back to Register</a></p>
+  </div>
+</div>
+
+<!-- ═══════════════════════════════════════════════════════════════════════════
+     MAIN APP
+════════════════════════════════════════════════════════════════════════════ -->
+<div id="app" class="app hidden">
+
+  <!-- Sidebar -->
+  <aside class="sidebar" id="sidebar">
+    <div class="sidebar-brand">
+      <div class="brand-logo-sm"><img src="/logo.png" alt="The Site" style="width:100%;height:100%;object-fit:cover;display:block;"></div>
+      <span class="sidebar-brand-name">The Site</span>
+    </div>
+
+    <nav class="sidebar-nav">
+      <a href="#" class="nav-item active" data-view="dashboard" onclick="switchView('dashboard', this)">
+        <span class="nav-icon">⚡</span>
+        <span class="nav-label">Dashboard</span>
+      </a>
+      <a href="#" class="nav-item owner-only" data-view="analytics" onclick="switchView('analytics', this)" id="nav-analytics">
+        <span class="nav-icon">📊</span>
+        <span class="nav-label">Analytics</span>
+      </a>
+    </nav>
+
+    <div class="sidebar-footer">
+      <div class="user-chip">
+        <div class="user-avatar" id="user-avatar">A</div>
+        <div class="user-info">
+          <span class="user-name" id="user-name">Admin</span>
+          <span class="user-role" id="user-role">Owner</span>
+        </div>
+      </div>
+      <button class="btn-logout" onclick="handleLogout()">Sign Out</button>
+    </div>
+  </aside>
+
+  <!-- Mobile Top Bar -->
+  <header class="mobile-header">
+    <button class="hamburger" onclick="toggleSidebar()">☰</button>
+    <div class="mobile-brand">The Site</div>
+    <div class="mobile-status" id="mobile-status">0/8 Active</div>
+  </header>
+
+  <!-- Sidebar Overlay -->
+  <div class="sidebar-overlay" id="sidebar-overlay" onclick="closeSidebar()"></div>
+
+  <!-- Main Content -->
+  <main class="main-content">
+
+    <!-- ── Dashboard View ── -->
+    <div id="view-dashboard" class="app-view active">
+      <div class="view-header">
+        <div>
+          <h2 class="view-title">Live Floor Plan</h2>
+          <p class="view-subtitle" id="status-bar">Loading...</p>
+        </div>
+        <button class="btn-refresh" onclick="loadDashboard()" title="Refresh">↻ Refresh</button>
+      </div>
+
+      <!-- Floor Plan -->
+      <div class="floor-wrapper">
+        <div class="floor-plan" id="floor-plan">
+
+          <!-- Top Row: Fridge + Shelf -->
+          <div class="floor-fridge">
+            <span>Fridge</span>
+          </div>
+          <div class="floor-shelf">
+            <div class="shelf-block"></div>
+            <div class="shelf-block"></div>
+          </div>
+
+          <!-- Top PCs -->
+          <div class="top-pc-row">
+            <div class="machine pc" id="PC5" data-id="PC5" onclick="openMachineModal('PC5')" tabindex="0" role="button" aria-label="PC 5">
+              <div class="machine-label">PC 5</div>
+              <div class="machine-status-dot"></div>
+            </div>
+            <div class="machine pc" id="PC6" data-id="PC6" onclick="openMachineModal('PC6')" tabindex="0" role="button" aria-label="PC 6">
+              <div class="machine-label">PC 6</div>
+              <div class="machine-status-dot"></div>
+            </div>
+          </div>
+
+          <!-- Left Wall -->
+          <div class="left-wall">
+            <div class="wall-shelf"></div>
+            <div class="wall-shelf"></div>
+            <div class="wall-shelf"></div>
+          </div>
+
+          <!-- Left Machines: PC1-PC4 -->
+          <div class="left-machines">
+            <div class="machine pc" id="PC4" data-id="PC4" onclick="openMachineModal('PC4')" tabindex="0" role="button" aria-label="PC 4">
+              <div class="machine-label">PC 4</div>
+              <div class="machine-status-dot"></div>
+            </div>
+            <div class="machine pc" id="PC3" data-id="PC3" onclick="openMachineModal('PC3')" tabindex="0" role="button" aria-label="PC 3">
+              <div class="machine-label">PC 3</div>
+              <div class="machine-status-dot"></div>
+            </div>
+            <div class="machine pc" id="PC2" data-id="PC2" onclick="openMachineModal('PC2')" tabindex="0" role="button" aria-label="PC 2">
+              <div class="machine-label">PC 2</div>
+              <div class="machine-status-dot"></div>
+            </div>
+            <div class="machine pc" id="PC1" data-id="PC1" onclick="openMachineModal('PC1')" tabindex="0" role="button" aria-label="PC 1">
+              <div class="machine-label">PC 1</div>
+              <div class="machine-status-dot"></div>
+            </div>
+          </div>
+
+          <!-- Center walkway -->
+          <div class="center-walk">
+            <div class="walk-arrow">&#8593;</div>
+          </div>
+
+          <!-- PS Stations + Seating -->
+          <div class="ps-zone">
+            <div class="ps-unit">
+              <div class="machine ps5" id="PS1" data-id="PS1" onclick="openMachineModal('PS1')" tabindex="0" role="button" aria-label="PlayStation 1">
+                <div class="ps-text">PLAY<br/>STATION<br/>1</div>
+                <div class="machine-status-dot"></div>
+              </div>
+              <div class="seating-col">
+                <div class="seat-block"></div>
+                <div class="seat-block"></div>
+              </div>
+            </div>
+            <div class="ps-unit">
+              <div class="machine ps5" id="PS2" data-id="PS2" onclick="openMachineModal('PS2')" tabindex="0" role="button" aria-label="PlayStation 2">
+                <div class="ps-text">PLAY<br/>STATION<br/>2</div>
+                <div class="machine-status-dot"></div>
+              </div>
+              <div class="seating-col">
+                <div class="seat-block"></div>
+                <div class="seat-block"></div>
+              </div>
+            </div>
+          </div>
+
+          <!-- Right Wall -->
+          <div class="right-wall">
+            <div class="wall-shelf"></div>
+            <div class="wall-shelf"></div>
+          </div>
+
+          <!-- Counter -->
+          <div class="floor-counter">COUNTER</div>
+
+          <!-- Entry Doors -->
+          <div class="floor-entries">
+            <div style="flex:1.5"></div>
+            <div class="entry-door" style="flex:0 0 25%;height:30px;"><span>Entry 1</span></div>
+            <div style="flex:2.5"></div>
+          </div>
+        </div>
+
+        <!-- Legend -->
+        <div class="floor-legend">
+          <div class="legend-item">
+            <div class="legend-dot occupied-pc"></div>
+            <span>PC Active</span>
+          </div>
+          <div class="legend-item">
+            <div class="legend-dot occupied-ps"></div>
+            <span>PS5 Active</span>
+          </div>
+          <div class="legend-item">
+            <div class="legend-dot available"></div>
+            <span>Available</span>
+          </div>
+          <div class="legend-item">
+            <div class="legend-dot expiring"></div>
+            <span>Expiring Soon</span>
+          </div>
+          <div class="legend-item">
+            <div class="legend-dot overtime"></div>
+            <span>Overtime</span>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- ── Analytics View ── -->
+    <div id="view-analytics" class="app-view">
+      <div class="view-header">
+        <div>
+          <h2 class="view-title">Occupancy Analytics</h2>
+          <p class="view-subtitle">Session history by machine and time</p>
+        </div>
+        <div class="analytics-controls">
+          <input type="date" id="analytics-date" onchange="loadAnalytics()" />
+          <button class="btn-refresh" onclick="loadAnalytics()">↻ Load</button>
+          <button class="btn-refresh owner-only" id="send-report-btn" onclick="sendDailyReport()" title="Email today's report to sitegamingcafe@gmail.com">✉ Send Report</button>
+        </div>
+      </div>
+
+      <!-- Summary Cards -->
+      <div class="summary-cards" id="summary-cards">
+        <div class="summary-card">
+          <div class="summary-value" id="s-sessions">–</div>
+          <div class="summary-label">Sessions Today</div>
+        </div>
+        <div class="summary-card primary">
+          <div class="summary-value" id="s-revenue">–</div>
+          <div class="summary-label">Total Revenue</div>
+        </div>
+        <div class="summary-card">
+          <div class="summary-value" id="s-machines">–</div>
+          <div class="summary-label">Machines Used</div>
+        </div>
+      </div>
+
+      <!-- Occupancy Grid -->
+      <div class="occupancy-container">
+        <div id="occupancy-grid"></div>
+      </div>
+    </div>
+
+  </main>
+</div>
+
+<!-- ═══════════════════════════════════════════════════════════════════════════
+     MACHINE MODAL
+════════════════════════════════════════════════════════════════════════════ -->
+<div id="machine-modal" class="modal-overlay" onclick="handleModalOverlayClick(event)">
+  <div class="modal-box" role="dialog" aria-modal="true">
+    <div class="modal-header">
+      <div>
+        <h3 id="modal-title">Machine</h3>
+        <span id="modal-badge" class="modal-badge"></span>
+      </div>
+      <button class="modal-close" onclick="closeModal('machine-modal')" aria-label="Close">✕</button>
+    </div>
+    <div class="modal-body" id="modal-body">
+      <!-- Injected by JS -->
+    </div>
+  </div>
+</div>
+
+<!-- ═══════════════════════════════════════════════════════════════════════════
+     INVOICE MODAL
+════════════════════════════════════════════════════════════════════════════ -->
+<div id="invoice-modal" class="modal-overlay" onclick="handleModalOverlayClick(event)">
+  <div class="modal-box modal-box-wide" role="dialog" aria-modal="true">
+    <div class="modal-header">
+      <div>
+        <h3>Invoice</h3>
+        <span class="modal-badge">Session Closed</span>
+      </div>
+      <button class="modal-close" onclick="closeModal('invoice-modal'); loadDashboard();" aria-label="Close">✕</button>
+    </div>
+    <div class="modal-body" id="invoice-body">
+      <!-- Injected by JS -->
+    </div>
+  </div>
+</div>
+
+<!-- Toast -->
+<div id="toast-container"></div>
+
+<script src="/js/app.js"></script>
+</body>
+</html>
