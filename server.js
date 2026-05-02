@@ -28,19 +28,26 @@ const PS5_RATES = {
 };
 
 const RATES = {
-  PC:  parseFloat(process.env.PC_RATE) || 79,
+  PC:  parseFloat(process.env.PC_RATE) || 59,
   PS5: PS5_RATES[1], // default (1-player rate) for display
 };
 
+const HAPPY_HOUR_RATE = parseFloat(process.env.HAPPY_HOUR_RATE) || 49;
+// Happy hours: strictly after 9:59 AM and strictly before 4:01 PM IST
+function isHappyHour() {
+  const now = nowIST();
+  const mins = now.getUTCHours() * 60 + now.getUTCMinutes();
+  return mins > 9 * 60 + 59 && mins < 16 * 60 + 1;
+}
+
 const MENU = {
   chips: [
-    { name: 'Lays',    price: 30 },
-    { name: 'Doritos', price: 40 },
+    { name: 'Chips', price: 10 },
   ],
   drinks: [
-    { name: 'Water',    price: 20  },
-    { name: 'Red Bull', price: 120 },
-    { name: 'Monster',  price: 100 },
+    { name: 'Water',     price: 10  },
+    { name: 'Red Bull',  price: 125 },
+    { name: 'Thums-Up', price: 20  },
   ],
 };
 
@@ -158,6 +165,7 @@ function getDailyReportData(dateStr) {
       s.id, s.machine_id, s.machine_type, s.customer_name,
       s.players, s.start_time, s.end_time, s.status,
       s.planned_hours, s.rate_per_hour, s.free_half_hour,
+      s.custom_amount, s.custom_comment,
       (SELECT json_group_array(json_object(
         'item_name', o.item_name, 'item_type', o.item_type,
         'quantity',  o.quantity,  'unit_price', o.unit_price
@@ -182,7 +190,7 @@ function getDailyReportData(dateStr) {
     const freeHalfCredit = s.free_half_hour ? s.rate_per_hour * 0.5 : 0;
     s.session_cost     = Math.max(0, s.billable_hours * s.rate_per_hour * (1 - s.discount_pct / 100) - freeHalfCredit);
     s.order_total      = s.orders.reduce((t, o) => t + o.quantity * o.unit_price, 0);
-    s.grand_total      = s.session_cost + s.order_total;
+    s.grand_total      = s.custom_amount > 0 ? s.custom_amount : s.session_cost + s.order_total;
     s.end_display      = s.end_time || new Date(endMs).toISOString();
   });
 
@@ -200,6 +208,8 @@ function buildDailyReportHtml(dateStr, sessions) {
   const totalOrderRevenue = sessions.reduce((t, s) => t + s.order_total,   0);
   const totalGaming       = totalRevenue - totalOrderRevenue;
   const machinesUsed      = [...new Set(sessions.map(s => s.machine_id))].length;
+  const totalCash         = sessions.reduce((t, s) => t + (s.cash_amount   || 0), 0);
+  const totalOnline       = sessions.reduce((t, s) => t + (s.online_amount || 0), 0);
 
   const displayDate = new Date(dateStr + 'T00:00:00').toLocaleDateString('en-IN', {
     weekday: 'long', day: 'numeric', month: 'long', year: 'numeric', timeZone: 'Asia/Kolkata',
@@ -240,7 +250,11 @@ function buildDailyReportHtml(dateStr, sessions) {
             <td style="padding:9px 8px;color:${s.order_total > 0 ? '#bb88ff' : '#444'};font-size:12px;text-align:right;">₹${s.order_total.toFixed(0)}</td>
             <td style="padding:9px 8px;color:#fff;font-weight:700;font-size:12px;text-align:right;">₹${s.grand_total.toFixed(0)}</td>
           </tr>
-          ${orderRows}`;
+          ${orderRows}
+          ${s.custom_comment ? `
+          <tr>
+            <td style="padding:3px 8px 5px 24px;color:#f59e0b;font-size:11px;font-style:italic;" colspan="6">↳ Note: ${s.custom_comment}</td>
+          </tr>` : ''}`;
       }).join('');
 
       return `
@@ -308,6 +322,16 @@ function buildDailyReportHtml(dateStr, sessions) {
         <td style="color:#fff;font-size:13px;font-weight:700;padding:4px 0;">Grand Total</td>
         <td style="color:#fff;font-size:13px;font-weight:700;text-align:right;padding:4px 0;">₹${Math.round(totalRevenue).toLocaleString('en-IN')}</td>
       </tr>
+      ${(totalCash > 0 || totalOnline > 0) ? `
+      <tr><td colspan="2" style="border-top:1px solid #222;padding:0;height:8px;"></td></tr>
+      <tr>
+        <td style="color:#888;font-size:11px;padding:3px 0;">Cash Collected</td>
+        <td style="color:#4ecdc4;font-size:11px;font-weight:600;text-align:right;padding:3px 0;">₹${Math.round(totalCash).toLocaleString('en-IN')}</td>
+      </tr>
+      <tr>
+        <td style="color:#888;font-size:11px;padding:3px 0;">Online Collected</td>
+        <td style="color:#a78bfa;font-size:11px;font-weight:600;text-align:right;padding:3px 0;">₹${Math.round(totalOnline).toLocaleString('en-IN')}</td>
+      </tr>` : ''}
     </table>
   </div>
 
@@ -420,25 +444,29 @@ async function sendDailyReport(dateStr) {
 }
 
 function scheduleDailyReport() {
-  function msUntilNext2359() {
+  function msUntilNextIST(h, m) {
     const nowIST_  = nowIST();
     const target   = new Date(nowIST_);
-    target.setHours(23, 59, 0, 0);
-    if (target <= nowIST_) target.setDate(target.getDate() + 1);
+    target.setUTCHours(h, m, 0, 0);
+    if (target <= nowIST_) target.setUTCDate(target.getUTCDate() + 1);
     return target.getTime() - nowIST_.getTime();
   }
 
-  function runAndReschedule() {
-    const dateStr = todayIST();
-    sendDailyReport(dateStr).catch(err =>
-      console.error('[REPORT] Failed to send daily report:', err.message)
-    );
-    setTimeout(runAndReschedule, msUntilNext2359());
+  function scheduleAt(h, m, label) {
+    function runAndReschedule() {
+      const dateStr = todayIST();
+      sendDailyReport(dateStr).catch(err =>
+        console.error(`[REPORT] Failed to send ${label} report:`, err.message)
+      );
+      setTimeout(runAndReschedule, msUntilNextIST(h, m));
+    }
+    setTimeout(runAndReschedule, msUntilNextIST(h, m));
+    const mins = Math.round(msUntilNextIST(h, m) / 60000);
+    console.log(`[REPORT] ${label} report scheduled (in ~${mins} min)`);
   }
 
-  setTimeout(runAndReschedule, msUntilNext2359());
-  const mins = Math.round(msUntilNext2359() / 60000);
-  console.log(`[REPORT] Daily report scheduled at 11:59 PM (in ~${mins} min)`);
+  scheduleAt(16,  0, '4:00 PM');
+  scheduleAt(23, 59, '11:59 PM');
 }
 
 // ── Auth Middleware ──────────────────────────────────────────────────────────
@@ -582,16 +610,19 @@ app.get('/api/machines', auth, (req, res) => {
       delete session.orders_json;
     }
 
+    const happyHour = isHappyHour();
+    const happyRates = { 1: HAPPY_HOUR_RATE, 2: HAPPY_HOUR_RATE * 2, 3: HAPPY_HOUR_RATE * 3, 4: HAPPY_HOUR_RATE * 4 };
+
     return {
       ...machine,
-      rate: machine.type === 'PS5' ? PS5_RATES[1] : RATES.PC,
-      ps5Rates: machine.type === 'PS5' ? PS5_RATES : undefined,
+      rate: happyHour ? HAPPY_HOUR_RATE : (machine.type === 'PS5' ? PS5_RATES[1] : RATES.PC),
+      ps5Rates: machine.type === 'PS5' ? (happyHour ? happyRates : PS5_RATES) : undefined,
       session: session || null,
       status: session ? 'occupied' : 'available',
     };
   });
 
-  res.json({ machines, menu: MENU, rates: RATES, offers: { freeHalfHour: process.env.OFFER_FREE_HALF_HOUR === 'true' } });
+  res.json({ machines, menu: MENU, rates: RATES, offers: { freeHalfHour: process.env.OFFER_FREE_HALF_HOUR === 'true', happyHour: isHappyHour(), happyHourRate: HAPPY_HOUR_RATE } });
 });
 
 app.post('/api/sessions', auth, (req, res) => {
@@ -616,7 +647,9 @@ app.post('/api/sessions', auth, (req, res) => {
     return res.status(400).json({ error: 'PS5 sessions require 1–4 players' });
   }
 
-  const rate = machine.type === 'PS5' ? (PS5_RATES[playerCount] || PS5_RATES[1]) : RATES.PC;
+  const rate = isHappyHour()
+    ? (machine.type === 'PS5' ? HAPPY_HOUR_RATE * playerCount : HAPPY_HOUR_RATE)
+    : (machine.type === 'PS5' ? (PS5_RATES[playerCount] || PS5_RATES[1]) : RATES.PC);
   const startTime = new Date().toISOString();
 
   const freeHalf = free_half_hour ? 1 : 0;
@@ -645,6 +678,20 @@ app.put('/api/sessions/:id', auth, (req, res) => {
     if (hrs < Math.ceil(elapsed)) {
       return res.status(400).json({
         error: `Hours cannot be less than elapsed time (min ${Math.ceil(elapsed)}h)`,
+      });
+    }
+  }
+
+  if (planned_hours !== undefined) {
+    const newHrs = parseFloat(planned_hours);
+    const oldHrs = session.planned_hours;
+    if (newHrs < oldHrs) {
+      const extensionsToRemove = Math.round((oldHrs - newHrs) / 0.25);
+      const extRows = db.prepare(
+        `SELECT id FROM orders WHERE session_id = ? AND item_type = 'extension' ORDER BY id DESC`
+      ).all(sessionId);
+      extRows.slice(0, extensionsToRemove).forEach(row => {
+        db.prepare(`DELETE FROM orders WHERE id = ?`).run(row.id);
       });
     }
   }
@@ -736,16 +783,16 @@ app.post('/api/sessions/:id/extend', auth, (req, res) => {
   const session = db.prepare(`SELECT * FROM sessions WHERE id = ? AND status = 'active'`).get(sessionId);
   if (!session) return res.status(404).json({ error: 'Active session not found' });
 
-  const price = session.machine_type === 'PS5'
-    ? Math.round(session.rate_per_hour * 0.6)
-    : parseFloat(process.env.PC_EXTEND_RATE) || 50;
+  const price = 15;
 
-  // Count existing extensions to label them
   const extCount = db.prepare(`SELECT COUNT(*) as c FROM orders WHERE session_id = ? AND item_type = 'extension'`).get(sessionId).c;
-  const label = extCount === 0 ? '+30 min' : `+30 min ×${extCount + 1}`;
+  const label = extCount === 0 ? '+15 min' : `+15 min ×${extCount + 1}`;
 
   db.prepare(`INSERT INTO orders (session_id, item_name, item_type, quantity, unit_price) VALUES (?, ?, 'extension', 1, ?)`)
     .run(sessionId, label, price);
+
+  db.prepare(`UPDATE sessions SET planned_hours = planned_hours + 0.25 WHERE id = ?`)
+    .run(sessionId);
 
   res.json({ ok: true, price, label });
 });
@@ -762,18 +809,21 @@ app.post('/api/sessions/:id/checkout', auth, (req, res) => {
   const endTime = new Date().toISOString();
 
   const actualHours     = (new Date(endTime) - new Date(session.start_time)) / 3600000;
-  const roundedBillable = session.planned_hours; // bill exactly what was set; employee adjusts manually if needed
+  const extCount        = orders.filter(o => o.item_type === 'extension').length;
+  const roundedBillable = session.planned_hours - extCount * 0.25;
   const discount        = roundedBillable >= 3 ? 0.10 : 0;
   const freeHalfCredit  = session.free_half_hour ? session.rate_per_hour * 0.5 : 0;
   const sessionCost     = Math.max(0, roundedBillable * session.rate_per_hour * (1 - discount) - freeHalfCredit);
   const orderTotal      = orders.reduce((s, o) => s + o.quantity * o.unit_price, 0);
   const customAmount    = parseFloat(req.body?.custom_amount) || 0;
   const customComment   = req.body?.custom_comment || '';
+  const cashAmount      = parseFloat(req.body?.cash_amount) || 0;
+  const onlineAmount    = parseFloat(req.body?.online_amount) || 0;
   const grandTotal      = customAmount > 0 ? customAmount : sessionCost + orderTotal;
 
   db.prepare(`
-    UPDATE sessions SET status = 'completed', end_time = ? WHERE id = ?
-  `).run(endTime, sessionId);
+    UPDATE sessions SET status = 'completed', end_time = ?, cash_amount = ?, online_amount = ?, custom_amount = ?, custom_comment = ? WHERE id = ?
+  `).run(endTime, cashAmount || null, onlineAmount || null, customAmount || null, customComment || null, sessionId);
 
   res.json({
     invoice: {
@@ -796,6 +846,8 @@ app.post('/api/sessions/:id/checkout', auth, (req, res) => {
       grand_total:     grandTotal,
       custom_amount:   customAmount > 0 ? customAmount : null,
       custom_comment:  customAmount > 0 ? customComment : null,
+      cash_amount:     cashAmount > 0 ? cashAmount : null,
+      online_amount:   onlineAmount > 0 ? onlineAmount : null,
     },
   });
 });
@@ -808,7 +860,7 @@ app.get('/api/analytics', auth, ownerOnly, (req, res) => {
     SELECT
       s.id, s.machine_id, s.machine_type, s.customer_name,
       s.start_time, s.planned_hours, s.end_time, s.status, s.rate_per_hour,
-      s.free_half_hour,
+      s.free_half_hour, s.cash_amount, s.online_amount,
       COALESCE((
         SELECT SUM(o.quantity * o.unit_price) FROM orders o WHERE o.session_id = s.id
       ), 0) AS order_total,
@@ -819,25 +871,197 @@ app.get('/api/analytics', auth, ownerOnly, (req, res) => {
   `).all(date);
 
   const summary = {
-    total_sessions: sessions.length,
-    total_revenue: sessions.reduce((sum, s) => {
+    total_sessions:  sessions.length,
+    total_revenue:   sessions.reduce((sum, s) => {
       const discount       = s.planned_hours >= 3 ? 0.10 : 0;
       const freeHalfCredit = s.free_half_hour ? s.rate_per_hour * 0.5 : 0;
       const sessionCost    = Math.max(0, s.planned_hours * s.rate_per_hour * (1 - discount) - freeHalfCredit);
       return sum + sessionCost + s.order_total;
     }, 0),
-    machines_used: [...new Set(sessions.map(s => s.machine_id))].length,
+    machines_used:   [...new Set(sessions.map(s => s.machine_id))].length,
+    total_cash:      sessions.reduce((t, s) => t + (s.cash_amount || 0), 0),
+    total_online:    sessions.reduce((t, s) => t + (s.online_amount || 0), 0),
   };
 
   res.json({ sessions, summary, date, machines: MACHINES });
 });
 
+// ── Analytics Range Route ─────────────────────────────────────────────────────
+function getDateRange(period) {
+  const today = todayIST();
+  const d = new Date(today);
+  if      (period === '1W') d.setDate(d.getDate() - 6);
+  else if (period === '1M') d.setDate(d.getDate() - 29);
+  else if (period === '1Y') d.setDate(d.getDate() - 364);
+  else                      return { from: today, to: today };
+  return { from: d.toISOString().split('T')[0], to: today };
+}
+
+function calcSessionCost(s) {
+  const discount       = s.planned_hours >= 3 ? 0.10 : 0;
+  const freeHalfCredit = s.free_half_hour ? s.rate_per_hour * 0.5 : 0;
+  return Math.max(0, s.planned_hours * s.rate_per_hour * (1 - discount) - freeHalfCredit);
+}
+
+app.get('/api/analytics/range', auth, ownerOnly, (req, res) => {
+  const period = req.query.period || '1D';
+  const { from, to } = getDateRange(period);
+
+  const sessions = db.prepare(`
+    SELECT
+      s.id, s.machine_id, s.machine_type, s.customer_name, s.customer_phone,
+      s.players, s.start_time, s.end_time, s.planned_hours, s.status,
+      s.rate_per_hour, s.free_half_hour, s.cash_amount, s.online_amount,
+      COALESCE((
+        SELECT SUM(o.quantity * o.unit_price) FROM orders o WHERE o.session_id = s.id
+      ), 0) AS order_total
+    FROM sessions s
+    WHERE date(datetime(s.start_time, '+5 hours', '30 minutes')) BETWEEN ? AND ?
+    ORDER BY s.start_time DESC
+  `).all(from, to);
+
+  const summary = {
+    total_sessions: sessions.length,
+    total_revenue:  sessions.reduce((t, s) => t + calcSessionCost(s) + s.order_total, 0),
+    machines_used:  [...new Set(sessions.map(s => s.machine_id))].length,
+    total_cash:     sessions.reduce((t, s) => t + (s.cash_amount || 0), 0),
+    total_online:   sessions.reduce((t, s) => t + (s.online_amount || 0), 0),
+  };
+
+  res.json({ sessions, summary, period, date_range: { from, to } });
+});
+
+// ── Range Report Builder ──────────────────────────────────────────────────────
+async function sendRangeReport(period) {
+  const { from, to } = getDateRange(period);
+  const periodLabels = { '1W': 'Last 7 Days', '1M': 'Last 30 Days', '1Y': 'Last Year' };
+  const label = periodLabels[period] || period;
+
+  const sessions = db.prepare(`
+    SELECT
+      s.id, s.machine_id, s.machine_type, s.customer_name,
+      s.players, s.start_time, s.end_time, s.planned_hours, s.status,
+      s.rate_per_hour, s.free_half_hour, s.cash_amount, s.online_amount,
+      s.custom_amount, s.custom_comment,
+      COALESCE((
+        SELECT SUM(o.quantity * o.unit_price) FROM orders o WHERE o.session_id = s.id
+      ), 0) AS order_total
+    FROM sessions s
+    WHERE date(datetime(s.start_time, '+5 hours', '30 minutes')) BETWEEN ? AND ?
+    ORDER BY s.start_time DESC
+  `).all(from, to);
+
+  const totalRevenue  = sessions.reduce((t, s) => t + (s.custom_amount > 0 ? s.custom_amount : calcSessionCost(s) + s.order_total), 0);
+  const totalCash     = sessions.reduce((t, s) => t + (s.cash_amount   || 0), 0);
+  const totalOnline   = sessions.reduce((t, s) => t + (s.online_amount || 0), 0);
+  const machinesUsed  = [...new Set(sessions.map(s => s.machine_id))].length;
+
+  // Group by date
+  const byDate = {};
+  sessions.forEach(s => {
+    const d = new Date(new Date(s.start_time).getTime() + 5.5 * 3600000).toISOString().split('T')[0];
+    if (!byDate[d]) byDate[d] = [];
+    byDate[d].push(s);
+  });
+
+  const fmtTime = iso => new Date(iso).toLocaleTimeString('en-IN', {
+    hour: '2-digit', minute: '2-digit', hour12: true, timeZone: 'Asia/Kolkata',
+  });
+  const fmtDate = d => new Date(d + 'T00:00:00').toLocaleDateString('en-IN', { day: 'numeric', month: 'short', year: 'numeric' });
+
+  const dateRows = Object.entries(byDate).sort(([a], [b]) => b.localeCompare(a)).map(([date, ss]) => {
+    const dayRevenue = ss.reduce((t, s) => t + calcSessionCost(s) + s.order_total, 0);
+    const sessionRows = ss.map(s => `
+      <tr>
+        <td style="padding:8px;color:#ccc;font-size:12px;">${s.machine_id}</td>
+        <td style="padding:8px;color:#ccc;font-size:12px;">${s.customer_name || 'Walk-in'}</td>
+        <td style="padding:8px;color:#aaa;font-size:12px;">${fmtTime(s.start_time)}</td>
+        <td style="padding:8px;color:#aaa;font-size:12px;">${s.planned_hours}h × ₹${s.rate_per_hour}</td>
+        <td style="padding:8px;color:#A6FF00;font-size:12px;text-align:right;">₹${Math.round(s.custom_amount > 0 ? s.custom_amount : calcSessionCost(s) + s.order_total)}</td>
+      </tr>
+      ${s.custom_comment ? `<tr><td colspan="5" style="padding:2px 8px 6px 20px;color:#f59e0b;font-size:11px;font-style:italic;">↳ Note: ${s.custom_comment}</td></tr>` : ''}`).join('');
+    return `
+      <tr><td colspan="5" style="padding:10px 8px 4px;color:#888;font-size:11px;letter-spacing:1px;border-top:1px solid #333;">
+        ${fmtDate(date)} · ${ss.length} session${ss.length > 1 ? 's' : ''} · ₹${Math.round(dayRevenue).toLocaleString('en-IN')}
+      </td></tr>
+      ${sessionRows}`;
+  }).join('');
+
+  const html = `<!DOCTYPE html><html><body style="background:#111;font-family:Arial,sans-serif;padding:24px;">
+    <div style="max-width:600px;margin:0 auto;background:#1a1a1a;border-radius:12px;padding:24px;">
+      <div style="text-align:center;margin-bottom:20px;">
+        <div style="color:#A6FF00;font-size:22px;font-weight:900;letter-spacing:2px;">THE SITE</div>
+        <div style="color:#555;font-size:12px;margin-top:2px;letter-spacing:1px;">GAMING CAFE · ${label.toUpperCase()} REPORT</div>
+        <div style="color:#666;font-size:11px;margin-top:4px;">${fmtDate(from)} – ${fmtDate(to)}</div>
+      </div>
+      <div style="display:flex;gap:12px;margin-bottom:20px;">
+        <div style="flex:1;background:#222;border-radius:8px;padding:14px;text-align:center;">
+          <div style="color:#A6FF00;font-size:24px;font-weight:900;">${sessions.length}</div>
+          <div style="color:#666;font-size:11px;margin-top:4px;">TOTAL SESSIONS</div>
+        </div>
+        <div style="flex:1;background:#1e2a0e;border:1px solid rgba(166,255,0,0.3);border-radius:8px;padding:14px;text-align:center;">
+          <div style="color:#A6FF00;font-size:24px;font-weight:900;">₹${Math.round(totalRevenue).toLocaleString('en-IN')}</div>
+          <div style="color:#666;font-size:11px;margin-top:4px;">TOTAL REVENUE</div>
+        </div>
+        <div style="flex:1;background:#222;border-radius:8px;padding:14px;text-align:center;">
+          <div style="color:#A6FF00;font-size:24px;font-weight:900;">${machinesUsed}</div>
+          <div style="color:#666;font-size:11px;margin-top:4px;">MACHINES USED</div>
+        </div>
+      </div>
+      ${(totalCash > 0 || totalOnline > 0) ? `
+      <div style="display:flex;gap:12px;margin-bottom:20px;">
+        <div style="flex:1;background:#0d2626;border:1px solid rgba(78,205,196,0.3);border-radius:8px;padding:14px;text-align:center;">
+          <div style="color:#4ecdc4;font-size:22px;font-weight:900;">₹${Math.round(totalCash).toLocaleString('en-IN')}</div>
+          <div style="color:#666;font-size:11px;margin-top:4px;">CASH COLLECTED</div>
+        </div>
+        <div style="flex:1;background:#1a1030;border:1px solid rgba(167,139,250,0.3);border-radius:8px;padding:14px;text-align:center;">
+          <div style="color:#a78bfa;font-size:22px;font-weight:900;">₹${Math.round(totalOnline).toLocaleString('en-IN')}</div>
+          <div style="color:#666;font-size:11px;margin-top:4px;">ONLINE COLLECTED</div>
+        </div>
+      </div>` : ''}
+      <table style="width:100%;border-collapse:collapse;">
+        <thead><tr>
+          <th style="padding:8px;color:#555;font-size:10px;text-align:left;letter-spacing:1px;">MACHINE</th>
+          <th style="padding:8px;color:#555;font-size:10px;text-align:left;letter-spacing:1px;">CUSTOMER</th>
+          <th style="padding:8px;color:#555;font-size:10px;text-align:left;letter-spacing:1px;">TIME</th>
+          <th style="padding:8px;color:#555;font-size:10px;text-align:left;letter-spacing:1px;">RATE</th>
+          <th style="padding:8px;color:#555;font-size:10px;text-align:right;letter-spacing:1px;">TOTAL</th>
+        </tr></thead>
+        <tbody>${dateRows}</tbody>
+      </table>
+    </div>
+  </body></html>`;
+
+  if (!transporter) {
+    console.log(`\n[REPORT] Email not configured — ${label} report ${from} to ${to}: ${sessions.length} sessions, ₹${Math.round(totalRevenue)}`);
+    return { skipped: true, sessions: sessions.length };
+  }
+
+  await transporter.sendMail({
+    from:    `"The Site Gaming" <${process.env.EMAIL_FROM || process.env.EMAIL_USER}>`,
+    to:      CAFE_EMAIL,
+    subject: `The Site — ${label} Report · ${fmtDate(from)}–${fmtDate(to)} · ₹${Math.round(totalRevenue).toLocaleString('en-IN')}`,
+    html,
+  });
+
+  console.log(`[REPORT] ${label} report sent to ${CAFE_EMAIL}`);
+  return { skipped: false, sessions: sessions.length };
+}
+
 // ── Report API (manual trigger, owner only) ───────────────────────────────────
 app.post('/api/report/send', auth, ownerOnly, async (req, res) => {
-  const dateStr = req.body?.date || todayIST();
+  const { date, period } = req.body || {};
+
   try {
-    const result = await sendDailyReport(dateStr);
-    res.json({ message: `Report for ${dateStr} ${result.skipped ? 'logged to console (email not configured)' : 'sent to ' + CAFE_EMAIL}`, ...result });
+    if (period && period !== '1D') {
+      const result = await sendRangeReport(period);
+      const { from, to } = getDateRange(period);
+      res.json({ message: `Range report (${period}: ${from} to ${to}) ${result.skipped ? 'logged to console' : 'sent to ' + CAFE_EMAIL}`, ...result });
+    } else {
+      const dateStr = date || todayIST();
+      const result  = await sendDailyReport(dateStr);
+      res.json({ message: `Report for ${dateStr} ${result.skipped ? 'logged to console (email not configured)' : 'sent to ' + CAFE_EMAIL}`, ...result });
+    }
   } catch (err) {
     res.status(500).json({ error: err.message });
   }

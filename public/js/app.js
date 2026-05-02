@@ -51,6 +51,7 @@ window.addEventListener('DOMContentLoaded', () => {
     if (e.key === 'Escape') {
       closeModal('machine-modal');
       closeModal('invoice-modal');
+      closeModal('payment-modal');
     }
   });
 });
@@ -185,7 +186,10 @@ function switchView(viewName, el) {
   if (el) el.classList.add('active');
 
   if (viewName === 'dashboard') loadDashboard();
-  if (viewName === 'analytics') loadAnalytics();
+  if (viewName === 'analytics') {
+    if (state.analyticsTab === 'graph') loadAnalytics();
+    else loadSessionCards();
+  }
 
   closeSidebar();
 }
@@ -411,6 +415,12 @@ function buildStartBody(machine) {
       </label>
     </div>` : ''}
 
+    ${state.offers?.happyHour ? `
+    <div style="background:rgba(166,255,0,0.08);border:1px solid var(--accent);border-radius:8px;padding:7px 12px;margin-bottom:10px;display:flex;align-items:center;gap:8px;">
+      <span style="font-size:1rem;">⚡</span>
+      <span style="color:var(--accent);font-size:0.82rem;font-weight:600;letter-spacing:0.5px;">HAPPY HOURS · ₹${state.offers.happyHourRate}/hr · 10AM – 4PM</span>
+    </div>` : ''}
+
     <div class="cost-preview">
       <span>Session Cost</span>
       <span class="cost" id="cost-preview">₹${machine.rate}</span>
@@ -424,6 +434,29 @@ function buildStartBody(machine) {
 }
 
 // ── Active Session Form ──────────────────────────────────────────────────────
+function renderSummaryOrderRows(orders) {
+  const exts    = (orders || []).filter(o => o.item_type === 'extension');
+  const regular = (orders || []).filter(o => o.item_type !== 'extension' && o.quantity > 0);
+  const extCount = exts.reduce((t, o) => t + o.quantity, 0);
+  const extTotal = exts.reduce((t, o) => t + o.quantity * o.unit_price, 0);
+
+  const regularRows = regular.map(o => `
+    <div class="summary-row">
+      <span class="s-label">${o.item_name}</span>
+      <span class="s-qty">${o.quantity}x</span>
+      <span class="s-amt">₹${(o.quantity * o.unit_price).toFixed(0)}</span>
+    </div>`).join('');
+
+  const extRow = extCount > 0 ? `
+    <div class="summary-row">
+      <span class="s-label">+15 min</span>
+      <span class="s-qty">${extCount}x</span>
+      <span class="s-amt">₹${extTotal.toFixed(0)}</span>
+    </div>` : '';
+
+  return regularRows + extRow;
+}
+
 function buildSessionBody(machine) {
   const s       = machine.session;
   const start   = new Date(s.start_time);
@@ -431,12 +464,13 @@ function buildSessionBody(machine) {
   const elapsed = (Date.now() - start.getTime()) / 3600000;
   const minHrs  = Math.max(1, Math.ceil(elapsed));
 
-  const discount    = s.planned_hours >= 3 ? 0.10 : 0;
+  const extCount    = (s.orders || []).filter(o => o.item_type === 'extension').length;
+  const baseHours   = s.planned_hours - extCount * 0.25;
+  const discount    = baseHours >= 3 ? 0.10 : 0;
   const freeHalf    = s.free_half_hour ? s.rate_per_hour * 0.5 : 0;
-  const sessionCost = Math.max(0, s.planned_hours * s.rate_per_hour * (1 - discount) - freeHalf);
+  const sessionCost = Math.max(0, baseHours * s.rate_per_hour * (1 - discount) - freeHalf);
   const orderCost   = (s.orders || []).reduce((t, o) => t + o.quantity * o.unit_price, 0);
 
-  // Build saved counts per item from all previous orders
   state.savedOrderCounts = {};
   (s.orders || []).forEach(o => {
     state.savedOrderCounts[o.item_name] = (state.savedOrderCounts[o.item_name] || 0) + o.quantity;
@@ -445,10 +479,14 @@ function buildSessionBody(machine) {
   const chipsHtml  = buildMenuItems(state.menu.chips,  'chips');
   const drinksHtml = buildMenuItems(state.menu.drinks, 'drinks');
 
+  const orderRows = renderSummaryOrderRows(s.orders);
+
+  const total = sessionCost + orderCost;
+
   return `
     <div class="session-layout">
 
-      <!-- LEFT: info + hours + cost + actions -->
+      <!-- LEFT: info + hours + extend -->
       <div class="session-col-left">
         <div class="session-info">
           <div class="info-row">
@@ -465,97 +503,80 @@ function buildSessionBody(machine) {
               color:var(--text);text-align:right;width:140px;font-size:0.9rem;outline:none;padding:2px 0;"
               onchange="updateCustomerInfo(${s.id})" />
           </div>
-          <div class="info-row">
-            <span>Start Time</span>
-            <span>${fmt12(start)}</span>
-          </div>
-          <div class="info-row">
-            <span>End Time</span>
-            <span id="valid-until">${fmt12(endTime)}</span>
-          </div>
+          <div class="info-row"><span>Start Time</span><span>${fmt12(start)}</span></div>
+          <div class="info-row"><span>End Time</span><span id="valid-until">${fmt12(endTime)}</span></div>
           <div class="info-row">
             <span>Remaining</span>
             <span id="elapsed-time" style="color:${elapsed >= s.planned_hours ? 'var(--danger)' : elapsed >= s.planned_hours - 10/60 ? 'var(--warning)' : 'inherit'}">${elapsed >= s.planned_hours ? `+${fmtHrs(elapsed - s.planned_hours)} OT` : fmtHrs(s.planned_hours - elapsed)}</span>
           </div>
-          <div class="info-row">
-            <span>Rate</span>
-            <span>₹${s.rate_per_hour}/hr${s.free_half_hour ? ' <span style="color:var(--warning);font-size:0.75rem;">½hr free</span>' : ''}</span>
-          </div>
-          ${machine.type === 'PS5' ? `
-          <div class="info-row">
-            <span>Players</span>
-            <span>${s.players || 1} player${(s.players || 1) > 1 ? 's' : ''}</span>
-          </div>` : ''}
+          <div class="info-row"><span>Rate</span><span>₹${s.rate_per_hour}/hr${s.free_half_hour ? ' <span style="color:var(--warning);font-size:0.75rem;">½hr free</span>' : ''}</span></div>
+          ${machine.type === 'PS5' ? `<div class="info-row"><span>Players</span><span>${s.players || 1} player${(s.players || 1) > 1 ? 's' : ''}</span></div>` : ''}
         </div>
 
         <div class="form-group">
           <label>Booked Hours <span style="color:var(--text-dim)">(min ${minHrs}h)</span></label>
           <div class="hours-control">
-            <button class="btn-icon" type="button"
-              onclick="adjustSessionHours(-1, ${minHrs}, '${s.start_time}')">−</button>
-            <input type="number" id="session-hours" value="${s.planned_hours}"
-                   min="${minHrs}" max="24" step="1"
+            <button class="btn-icon" type="button" onclick="adjustSessionHours(-1, ${minHrs}, '${s.start_time}')">−</button>
+            <input type="number" id="session-hours" value="${baseHours}" min="${minHrs}" max="24" step="1"
                    oninput="onHoursChange('${s.start_time}')" />
-            <button class="btn-icon" type="button"
-              onclick="adjustSessionHours(1, ${minHrs}, '${s.start_time}')">+</button>
+            <button class="btn-icon" type="button" onclick="adjustSessionHours(1, ${minHrs}, '${s.start_time}')">+</button>
+          </div>
+        </div>
+
+        <div class="form-group" style="margin-top:8px;">
+          <label>Extend <span style="color:var(--text-dim)">(× 15 min · ₹15)</span></label>
+          <div class="hours-control">
+            <button class="btn-icon" type="button" onclick="removeExtension(${s.id}, '${machine.id}')">−</button>
+            <input type="text" id="ext-count-display" readonly value="${extCount}"
+                   style="text-align:center;pointer-events:none;" />
+            <button class="btn-icon" type="button" onclick="extendSession(${s.id}, '${machine.id}')">+</button>
           </div>
         </div>
 
       </div>
 
-      <!-- RIGHT: add items + order summary + cost + actions -->
-      <div class="session-col-right">
-        <div class="orders-section">
-          <h4>Add Items</h4>
-          <div class="menu-grid-3">
-            <div class="menu-category">
-              <h5>Chips</h5>
-              ${chipsHtml}
-            </div>
-            <div class="menu-category">
-              <h5>Drinks</h5>
-              ${drinksHtml}
-            </div>
-            <div class="menu-category">
-              <div class="cost-summary" id="cost-summary">
-                <div class="cost-row">
-                  <span id="session-cost-label">Session (${s.planned_hours}h)${s.planned_hours >= 3 ? ' <span style="color:var(--warning);font-size:0.75rem">-10%</span>' : ''}${s.free_half_hour ? ' <span style="color:var(--warning);font-size:0.75rem">-½hr free</span>' : ''}</span>
-                  <span id="session-cost-val">${(s.free_half_hour || s.planned_hours >= 3) ? `<span style="text-decoration:line-through;color:var(--text-muted);font-size:0.85rem;margin-right:4px;">₹${(s.planned_hours * s.rate_per_hour).toFixed(0)}</span>` : ''}₹${sessionCost.toFixed(0)}</span>
-                </div>
-                <div id="order-items-list">${(s.orders || []).map(o => `
-                  <div class="cost-row" style="font-size:0.82rem;">
-                    <span>${o.item_name} ×${o.quantity}</span>
-                    <span>₹${(o.quantity * o.unit_price).toFixed(0)}</span>
-                  </div>
-                `).join('')}</div>
-                <div id="pending-orders-row" style="display:none">
-                  <div id="pending-items-list" style="font-size:0.8rem;color:var(--text-muted);padding:2px 0 4px;"></div>
-                  <div class="cost-row">
-                    <span>Pending</span>
-                    <span id="pending-orders-val">₹0</span>
-                  </div>
-                </div>
-                <div class="cost-row total">
-                  <span>Total</span>
-                  <span id="running-total">₹${(sessionCost + orderCost).toFixed(0)}</span>
-                </div>
-                <div style="margin-top:10px;">
-                  <input type="number" id="custom-amount" placeholder="Custom Amount (optional)" min="0"
-                    style="width:100%;margin-bottom:6px;"
-                    oninput="onCustomAmountInput(this)" />
-                  <input type="text" id="custom-comment" placeholder="Comment (required)" maxlength="120"
-                    style="width:100%;display:none;" />
-                </div>
-              </div>
+      <!-- MIDDLE: Add Items (single column) -->
+      <div class="session-col-items">
+        <div class="items-section-title">Add Items</div>
+        <div class="menu-category"><h5>Chips</h5>${chipsHtml}</div>
+        <div class="menu-category"><h5>Drinks</h5>${drinksHtml}</div>
+      </div>
+
+      <!-- RIGHT: Summary + Checkout -->
+      <div class="session-col-summary">
+        <div class="summary-title">Summary</div>
+        <div class="summary-panel">
+          <div class="summary-row">
+            <span class="s-label" id="session-cost-label">Session${discount > 0 ? ' <span style="color:var(--warning);font-size:0.7rem">-10%</span>' : ''}${freeHalf > 0 ? ' <span style="color:var(--warning);font-size:0.7rem">½free</span>' : ''}</span>
+            <span class="s-qty" id="session-cost-hrs">${baseHours}h</span>
+            <span class="s-amt" id="session-cost-val">${(freeHalf > 0 || discount > 0) ? `<span style="text-decoration:line-through;color:var(--text-muted);font-size:0.8rem;margin-right:2px;">₹${(baseHours * s.rate_per_hour).toFixed(0)}</span>` : ''}₹${sessionCost.toFixed(0)}</span>
+          </div>
+          <div id="order-items-list">${orderRows}</div>
+          <div id="pending-orders-row" style="display:none">
+            <div id="pending-items-list" style="font-size:0.78rem;color:var(--text-muted);padding:2px 0;"></div>
+            <div class="summary-row">
+              <span class="s-label">Pending</span><span class="s-qty"></span>
+              <span class="s-amt" id="pending-orders-val">₹0</span>
             </div>
           </div>
+          <div class="summary-divider"></div>
+          <div class="summary-total-row">
+            <span>Total</span>
+            <span id="running-total">₹${total.toFixed(0)}</span>
+          </div>
+        </div>
+
+        <div class="modal-checkout-bar">
+          <input type="number" id="custom-amount" placeholder="Enter custom amount (optional)" min="0"
+            oninput="onCustomAmountInput(this)" />
+          <input type="text" id="custom-comment" placeholder="Comment (required)" maxlength="120"
+            style="display:none;" />
+          <button class="btn-checkout" onclick="checkout('${s.id}')">
+            End Session &nbsp;·&nbsp; <span id="checkout-total">₹${total.toFixed(0)}</span>
+          </button>
         </div>
       </div>
 
-    </div>
-    <div style="display:flex;justify-content:space-between;align-items:center;padding:12px 0 0;">
-      <button class="btn-extend" onclick="extendSession(${s.id}, '${machine.id}')">+30 min · ₹${machine.type === 'PS5' ? Math.round(s.rate_per_hour * 0.6) : 50}</button>
-      <button class="btn-danger" style="min-width:180px;" onclick="checkout('${s.id}')">Checkout</button>
     </div>
   `;
 }
@@ -635,31 +656,42 @@ function adjustSessionHours(delta, min, startTimeISO) {
 }
 
 function onHoursChange(startTimeISO) {
-  const hrs   = parseFloat(document.getElementById('session-hours')?.value) || 1;
-  const start = new Date(startTimeISO);
-  const end   = new Date(start.getTime() + hrs * 3600000);
+  // hrs = base hours (input no longer includes extensions)
+  const hrs     = parseFloat(document.getElementById('session-hours')?.value) || 1;
+  const machine = getMachineFromModal();
+  if (!machine?.session) return;
+  const extCount       = (machine.session.orders || []).filter(o => o.item_type === 'extension').length;
+  const actualPlanned  = hrs + extCount * 0.25;
 
+  const start = new Date(startTimeISO);
+  const end   = new Date(start.getTime() + actualPlanned * 3600000);
   const validUntilEl = document.getElementById('valid-until');
   if (validUntilEl) validUntilEl.textContent = fmt12(end);
 
-  // Update cost
-  const machine = getMachineFromModal();
-  if (!machine?.session) return;
+  // Update cost (hrs is already base hours)
   const discount    = hrs >= 3 ? 0.10 : 0;
   const freeHalf    = machine.session.free_half_hour ? machine.session.rate_per_hour * 0.5 : 0;
   const sessionCost = Math.max(0, hrs * machine.session.rate_per_hour * (1 - discount) - freeHalf);
   const el = document.getElementById('session-cost-label');
+  const eh = document.getElementById('session-cost-hrs');
   const ev = document.getElementById('session-cost-val');
-  if (el) el.innerHTML = `Session (${hrs}h)${discount > 0 ? ' <span style="color:var(--warning);font-size:0.75rem">-10%</span>' : ''}${freeHalf > 0 ? ' <span style="color:var(--warning);font-size:0.75rem">-½hr free</span>' : ''}`;
-  if (ev) ev.innerHTML = `${(freeHalf > 0 || discount > 0) ? `<span style="text-decoration:line-through;color:var(--text-muted);font-size:0.85rem;margin-right:4px;">₹${(hrs * machine.session.rate_per_hour).toFixed(0)}</span>` : ''}₹${sessionCost.toFixed(0)}`;
+  if (el) el.innerHTML = `Session${discount > 0 ? ' <span style="color:var(--warning);font-size:0.7rem">-10%</span>' : ''}${freeHalf > 0 ? ' <span style="color:var(--warning);font-size:0.7rem">½free</span>' : ''}`;
+  if (eh) eh.textContent = `${hrs}h`;
+  if (ev) ev.innerHTML = `${(freeHalf > 0 || discount > 0) ? `<span style="text-decoration:line-through;color:var(--text-muted);font-size:0.8rem;margin-right:2px;">₹${(hrs * machine.session.rate_per_hour).toFixed(0)}</span>` : ''}₹${sessionCost.toFixed(0)}`;
   updateRunningTotal();
 
-  // Save to server
+  // Save to server — always send total planned (base + extensions)
   clearTimeout(onHoursChange._timer);
   onHoursChange._timer = setTimeout(async () => {
     try {
-      await api('PUT', `/api/sessions/${machine.session.id}`, { planned_hours: hrs });
-      machine.session.planned_hours = hrs;
+      const oldHrs = machine.session.planned_hours;
+      await api('PUT', `/api/sessions/${machine.session.id}`, { planned_hours: actualPlanned });
+      machine.session.planned_hours = actualPlanned;
+      if (actualPlanned < oldHrs) {
+        const data = await api('GET', '/api/machines');
+        state.machines = data.machines;
+        openMachineModal(machine.id);
+      }
     } catch (err) {
       showToast(err.message, 'error');
     }
@@ -677,7 +709,8 @@ function updateCostPreview(machine) {
   const el         = document.getElementById('cost-preview');
   const info       = document.getElementById('rate-info');
   if (el) el.innerHTML = `${discount > 0 ? `<span style="text-decoration:line-through;color:var(--text-muted);font-size:0.85rem;margin-right:4px;">₹${(hrs * rate).toFixed(0)}</span>` : ''}₹${cost.toFixed(0)}${discount > 0 ? ' <span style="color:var(--warning);font-size:0.75rem">-10%</span>' : ''}${freeHalf > 0 ? ' <span style="color:var(--warning);font-size:0.75rem">-½hr free</span>' : ''}`;
-  if (info) info.textContent = `Rate: ₹${rate}/hour · Billed in whole hours${hrs >= 3 ? ' · 10% discount applied' : ' · 10% off on 3h+'}${freeHalf > 0 ? ' · First ½hr free' : ''}`;
+  const happyLabel = state.offers?.happyHour ? ' · Happy Hours rate' : '';
+  if (info) info.textContent = `Rate: ₹${rate}/hour · Billed in whole hours${happyLabel}${hrs >= 3 ? ' · 10% discount applied' : ' · 10% off on 3h+'}${freeHalf > 0 ? ' · First ½hr free' : ''}`;
 }
 
 // ── Order Controls ───────────────────────────────────────────────────────────
@@ -737,32 +770,32 @@ function updateRunningTotal() {
   if (!machine?.session) return;
 
   const s = machine.session;
-  const hrs = parseFloat(document.getElementById('session-hours')?.value) || s.planned_hours;
-  const discount    = hrs >= 3 ? 0.10 : 0;
-  const sessionCost = hrs * s.rate_per_hour * (1 - discount);
+  const extCount = (s.orders || []).filter(o => o.item_type === 'extension').length;
+  // session-hours input now shows base hours (without extensions)
+  const baseHrs  = parseFloat(document.getElementById('session-hours')?.value) || (s.planned_hours - extCount * 0.25);
+  const discount    = baseHrs >= 3 ? 0.10 : 0;
+  const sessionCost = baseHrs * s.rate_per_hour * (1 - discount);
   const prevOrders   = (s.orders || []).reduce((t, o) => t + o.quantity * o.unit_price, 0);
   const pendingCost  = calcPendingCost();
 
-  const totalEl   = document.getElementById('running-total');
+  const totalEl    = document.getElementById('running-total');
+  const checkoutEl = document.getElementById('checkout-total');
   const pendingRow = document.getElementById('pending-orders-row');
   const pendingVal = document.getElementById('pending-orders-val');
 
   const customAmt = parseFloat(document.getElementById('custom-amount')?.value) || 0;
+  const displayTotal = customAmt > 0 ? `₹${customAmt.toFixed(0)}` : `₹${(sessionCost + prevOrders + pendingCost).toFixed(0)}`;
 
   if (pendingRow) pendingRow.style.display = pendingCost > 0 ? '' : 'none';
   if (pendingVal) pendingVal.textContent = `₹${pendingCost.toFixed(0)}`;
-  if (totalEl)    totalEl.textContent = customAmt > 0 ? `₹${customAmt.toFixed(0)}` : `₹${(sessionCost + prevOrders + pendingCost).toFixed(0)}`;
+  if (totalEl)    totalEl.textContent = displayTotal;
+  if (checkoutEl) checkoutEl.textContent = displayTotal;
 
   // Re-render saved order item rows
   const orderItemsEl = document.getElementById('order-items-list');
   if (orderItemsEl) {
     const orders = getMachineFromModal()?.session?.orders || [];
-    orderItemsEl.innerHTML = orders.map(o => `
-      <div class="cost-row" style="font-size:0.82rem;">
-        <span>${o.item_name} ×${o.quantity}</span>
-        <span>₹${(o.quantity * o.unit_price).toFixed(0)}</span>
-      </div>
-    `).join('');
+    orderItemsEl.innerHTML = renderSummaryOrderRows(orders);
   }
 
   // Update pending items list
@@ -876,7 +909,24 @@ async function saveSession(sessionId, machineId) {
 async function extendSession(sessionId, machineId) {
   try {
     const res = await api('POST', `/api/sessions/${sessionId}/extend`);
-    showToast(`Extended +30 min · ₹${res.price} charged`, 'success');
+    showToast(`Extended +15 min · ₹${res.price} charged`, 'success');
+    const data = await api('GET', '/api/machines');
+    state.machines = data.machines;
+    openMachineModal(machineId);
+  } catch (err) {
+    showToast(err.message, 'error');
+  }
+}
+
+async function removeExtension(sessionId, machineId) {
+  const machine = state.machines.find(m => m.id === machineId);
+  if (!machine?.session) return;
+  const exts = (machine.session.orders || []).filter(o => o.item_type === 'extension');
+  if (!exts.length) { showToast('No extensions to remove', 'error'); return; }
+  try {
+    const newHrs = machine.session.planned_hours - 0.25;
+    await api('PUT', `/api/sessions/${sessionId}`, { planned_hours: newHrs });
+    showToast('Extension removed', 'success');
     const data = await api('GET', '/api/machines');
     state.machines = data.machines;
     openMachineModal(machineId);
@@ -893,14 +943,12 @@ async function checkout(sessionId) {
     document.getElementById('custom-comment')?.focus();
     return;
   }
-  if (!confirm('End this session and generate invoice?')) return;
 
   // Save any pending orders first
   const machine = getMachineFromModal();
   if (machine?.session) {
     const hrs = parseFloat(document.getElementById('session-hours')?.value);
     const pending = Object.entries(state.pendingOrders).filter(([, qty]) => qty > 0);
-
     try {
       if (hrs) await api('PUT', `/api/sessions/${sessionId}`, { planned_hours: hrs });
       if (pending.length > 0 && state.menu) {
@@ -915,13 +963,60 @@ async function checkout(sessionId) {
     } catch { /* ignore — proceed to checkout */ }
   }
 
+  // Determine effective total for payment modal
+  const total = customAmt > 0
+    ? customAmt
+    : parseFloat(document.getElementById('running-total')?.textContent?.replace(/[^\d.]/g, '')) || 0;
+
+  // Store checkout context and open payment modal
+  state.pendingCheckout = { sessionId, customAmt, customComment };
+  document.getElementById('payment-total-val').textContent = `₹${total.toFixed(0)}`;
+  document.getElementById('pay-cash').value = total.toFixed(0);
+  document.getElementById('pay-online').value = 0;
+  document.getElementById('payment-modal').classList.add('active');
+}
+
+async function confirmPayment() {
+  const { sessionId, customAmt, customComment } = state.pendingCheckout || {};
+  if (!sessionId) return;
+
+  const cashAmt   = parseFloat(document.getElementById('pay-cash')?.value) || 0;
+  const onlineAmt = parseFloat(document.getElementById('pay-online')?.value) || 0;
+
+  const btn = document.getElementById('payment-confirm-btn');
+  btn.disabled = true;
+  btn.textContent = 'Processing…';
+
   try {
-    const data = await api('POST', `/api/sessions/${sessionId}/checkout`, customAmt > 0 ? { custom_amount: customAmt, custom_comment: customComment } : undefined);
+    const body = {
+      ...(customAmt > 0 ? { custom_amount: customAmt, custom_comment: customComment } : {}),
+      ...(cashAmt   > 0 ? { cash_amount: cashAmt }     : {}),
+      ...(onlineAmt > 0 ? { online_amount: onlineAmt } : {}),
+    };
+    const data = await api('POST', `/api/sessions/${sessionId}/checkout`, Object.keys(body).length ? body : undefined);
+    closeModal('payment-modal');
     closeModal('machine-modal');
     showInvoice(data.invoice);
     await loadDashboard();
   } catch (err) {
     showToast(err.message, 'error');
+    btn.disabled = false;
+    btn.textContent = 'End Session';
+  }
+}
+
+function onPaymentInput(source) {
+  const total = parseFloat(document.getElementById('payment-total-val')?.textContent?.replace(/[^\d.]/g, '')) || 0;
+  const cashEl   = document.getElementById('pay-cash');
+  const onlineEl = document.getElementById('pay-online');
+  if (source === 'cash') {
+    const cash = Math.min(Math.max(parseFloat(cashEl.value) || 0, 0), total);
+    cashEl.value   = cash;
+    onlineEl.value = parseFloat((total - cash).toFixed(2));
+  } else {
+    const online = Math.min(Math.max(parseFloat(onlineEl.value) || 0, 0), total);
+    onlineEl.value = online;
+    cashEl.value   = parseFloat((total - online).toFixed(2));
   }
 }
 
@@ -983,16 +1078,16 @@ function showInvoice(inv) {
       ` : ''}
     </div>
 
-    ${inv.custom_amount ? `
-    <div style="display:flex;justify-content:space-between;margin:8px 0;font-size:0.85rem;color:var(--text-muted);">
-      <span>Custom Amount</span>
-      <span style="font-style:italic;">${inv.custom_comment}</span>
-    </div>
-    ` : ''}
     <div class="invoice-total">
       <span>Grand Total</span>
       <span>₹${inv.grand_total.toFixed(0)}</span>
     </div>
+    ${(inv.cash_amount || inv.online_amount) ? `
+    <div style="display:flex;gap:16px;margin-top:8px;font-size:0.82rem;color:var(--text-muted);">
+      ${inv.cash_amount   ? `<span>Cash ₹${inv.cash_amount.toFixed(0)}</span>`     : ''}
+      ${inv.online_amount ? `<span>Online ₹${inv.online_amount.toFixed(0)}</span>` : ''}
+    </div>
+    ` : ''}
 
     <div class="invoice-actions">
       <button class="btn-secondary" style="flex:1"
@@ -1007,18 +1102,57 @@ function showInvoice(inv) {
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
-// DAILY REPORT
+// ANALYTICS — TABS & PERIOD
 // ═══════════════════════════════════════════════════════════════════════════════
+state.analyticsTab    = 'sessions';
+state.analyticsPeriod = '1D';
+
+function switchAnalyticsTab(tab) {
+  state.analyticsTab = tab;
+  document.querySelectorAll('.analytics-tab').forEach(t =>
+    t.classList.toggle('active', t.id === `tab-${tab}`)
+  );
+  document.querySelectorAll('.analytics-pane').forEach(p =>
+    p.classList.toggle('active', p.id === `analytics-pane-${tab}`)
+  );
+  if (tab === 'sessions') loadSessionCards();
+  else                    loadAnalytics();
+}
+
+function setAnalyticsPeriod(period) {
+  state.analyticsPeriod = period;
+  document.querySelectorAll('.period-btn').forEach(b =>
+    b.classList.toggle('active', b.dataset.period === period)
+  );
+  loadSessionCards();
+}
+
+// ── Send Report ──────────────────────────────────────────────────────────────
 async function sendDailyReport() {
-  const btn     = document.getElementById('send-report-btn');
-  const dateStr = document.getElementById('analytics-date')?.value || new Date().toISOString().split('T')[0];
-  const label   = new Date(dateStr + 'T00:00:00').toLocaleDateString('en-IN', { day: 'numeric', month: 'short' });
+  const btn    = document.getElementById('send-report-btn');
+  const period = state.analyticsPeriod || '1D';
+  const isSessionsTab = state.analyticsTab === 'sessions';
+
+  let payload, label;
+  if (isSessionsTab && period !== '1D') {
+    payload = { period };
+    label   = period === '1W' ? 'Last 7 days' : period === '1M' ? 'Last 30 days' : 'Last year';
+  } else {
+    const dateStr = isSessionsTab
+      ? new Date().toISOString().split('T')[0]
+      : (document.getElementById('analytics-date')?.value || new Date().toISOString().split('T')[0]);
+    payload = { date: dateStr };
+    label   = new Date(dateStr + 'T00:00:00').toLocaleDateString('en-IN', { day: 'numeric', month: 'short' });
+  }
 
   setLoading(btn, true);
   try {
-    const data = await api('POST', '/api/report/send', { date: dateStr });
-    showToast(`Report for ${label} sent ✓`, 'success');
-    console.log(data.message);
+    const result = await api('POST', '/api/report/send', payload);
+    if (result.skipped) {
+      showToast('Email not configured on server — check console', 'error');
+    } else {
+      showToast(`Report (${label}) sent ✓`, 'success');
+    }
   } catch (err) {
     showToast(err.message, 'error');
   } finally {
@@ -1026,29 +1160,118 @@ async function sendDailyReport() {
   }
 }
 
-// ═══════════════════════════════════════════════════════════════════════════════
-// ANALYTICS
-// ═══════════════════════════════════════════════════════════════════════════════
+// ── Sessions Tab ─────────────────────────────────────────────────────────────
+async function loadSessionCards() {
+  const period = state.analyticsPeriod || '1D';
+  const container = document.getElementById('session-cards-container');
+  if (!container) return;
+  container.innerHTML = '<div class="no-data" style="padding:32px 0;">Loading…</div>';
+
+  try {
+    const data = await api('GET', `/api/analytics/range?period=${period}`);
+    renderSummaryCards(data.summary, period);
+    renderSessionCards(data.sessions, period);
+  } catch (err) {
+    showToast(err.message, 'error');
+    container.innerHTML = '<div class="no-data">Failed to load sessions.</div>';
+  }
+}
+
+function renderSessionCards(sessions, period) {
+  const container = document.getElementById('session-cards-container');
+  if (!sessions.length) {
+    container.innerHTML = '<div class="no-data">No sessions in this period.</div>';
+    return;
+  }
+
+  const IST_OFFSET_MS = 5.5 * 60 * 60 * 1000;
+  const fmtTime = iso => new Date(iso).toLocaleTimeString('en-IN', {
+    hour: '2-digit', minute: '2-digit', hour12: true, timeZone: 'Asia/Kolkata',
+  });
+  const fmtDate = iso => new Date(new Date(iso).getTime() + IST_OFFSET_MS)
+    .toLocaleDateString('en-IN', { day: 'numeric', month: 'short' });
+
+  const groups = {};
+  sessions.forEach(s => {
+    const day = new Date(new Date(s.start_time).getTime() + IST_OFFSET_MS).toISOString().split('T')[0];
+    if (!groups[day]) groups[day] = [];
+    groups[day].push(s);
+  });
+
+  let html = '';
+  Object.entries(groups).sort(([a], [b]) => b.localeCompare(a)).forEach(([day, daySessions]) => {
+    const dayRevenue = daySessions.reduce((t, s) => {
+      const disc = s.planned_hours >= 3 ? 0.10 : 0;
+      const fhc  = s.free_half_hour ? s.rate_per_hour * 0.5 : 0;
+      return t + Math.max(0, s.planned_hours * s.rate_per_hour * (1 - disc) - fhc) + (s.order_total || 0);
+    }, 0);
+
+    if (period !== '1D') {
+      html += `<div class="session-day-header">
+        <span>${fmtDate(day + 'T12:00:00Z')}</span>
+        <span>₹${Math.round(dayRevenue).toLocaleString('en-IN')} · ${daySessions.length} session${daySessions.length > 1 ? 's' : ''}</span>
+      </div>`;
+    }
+
+    daySessions.forEach(s => {
+      const disc        = s.planned_hours >= 3 ? 0.10 : 0;
+      const fhc         = s.free_half_hour ? s.rate_per_hour * 0.5 : 0;
+      const sessionCost = Math.max(0, s.planned_hours * s.rate_per_hour * (1 - disc) - fhc);
+      const total       = sessionCost + (s.order_total || 0);
+      const isPS5       = s.machine_type === 'PS5';
+
+      html += `<div class="session-card">
+        <div class="session-card-left">
+          <span class="session-card-machine ${isPS5 ? 'ps5' : 'pc'}">${s.machine_id}</span>
+          <div class="session-card-info">
+            <span class="session-card-name">${s.customer_name?.trim() || 'Walk-in'}</span>
+            <span class="session-card-time">${fmtTime(s.start_time)}${s.end_time ? ' – ' + fmtTime(s.end_time) : ''} · ${s.planned_hours}h</span>
+            <span class="session-card-rate">${s.players || 1} Player${(s.players || 1) > 1 ? 's' : ''}${s.free_half_hour ? ' · ½hr free' : ''}${disc > 0 ? ' · -10%' : ''}</span>
+          </div>
+        </div>
+        <div class="session-card-total">₹${Math.round(total).toLocaleString('en-IN')}</div>
+      </div>`;
+    });
+  });
+
+  container.innerHTML = html;
+}
+
+// ── Graph Tab ────────────────────────────────────────────────────────────────
 async function loadAnalytics() {
   const dateInput = document.getElementById('analytics-date');
-  if (!dateInput.value) {
-    dateInput.value = new Date().toISOString().split('T')[0];
-  }
+  if (!dateInput) return;
+  if (!dateInput.value) dateInput.value = new Date().toISOString().split('T')[0];
   const date = dateInput.value;
 
   try {
     const data = await api('GET', `/api/analytics?date=${date}`);
-    renderSummaryCards(data.summary);
+    renderSummaryCards(data.summary, '1D');
     renderOccupancyGrid(data.sessions, data.machines, date);
   } catch (err) {
     showToast(err.message, 'error');
   }
 }
 
-function renderSummaryCards(summary) {
-  document.getElementById('s-sessions').textContent = summary.total_sessions;
-  document.getElementById('s-revenue').textContent  = `₹${Math.round(summary.total_revenue).toLocaleString('en-IN')}`;
-  document.getElementById('s-machines').textContent = `${summary.machines_used}/8`;
+function renderSummaryCards(summary, period) {
+  const periodLabels = { '1D': 'Today', '1W': '7-Day', '1M': '30-Day', '1Y': 'Yearly' };
+  const label = periodLabels[period] || '';
+  document.getElementById('s-sessions').textContent       = summary.total_sessions;
+  document.getElementById('s-sessions-label').textContent = `${label} Sessions`;
+  document.getElementById('s-revenue').textContent        = `₹${Math.round(summary.total_revenue).toLocaleString('en-IN')}`;
+  document.getElementById('s-revenue-label').textContent  = `${label} Revenue`;
+  document.getElementById('s-machines').textContent       = `${summary.machines_used}/8`;
+
+  const cash   = summary.total_cash   || 0;
+  const online = summary.total_online || 0;
+  const breakdownEl = document.getElementById('payment-breakdown');
+  if (cash > 0 || online > 0) {
+    document.getElementById('s-cash').textContent   = `₹${Math.round(cash).toLocaleString('en-IN')}`;
+    document.getElementById('s-online').textContent = `₹${Math.round(online).toLocaleString('en-IN')}`;
+    breakdownEl.style.display = 'flex';
+  } else {
+    breakdownEl.style.display = 'none';
+  }
 }
 
 function renderOccupancyGrid(sessions, machines, date) {

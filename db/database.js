@@ -76,6 +76,24 @@ function initDB() {
     console.log('[DB] Added free_half_hour column to sessions');
   } catch { /* column already exists */ }
 
+  // Add payment tracking columns to existing DB if missing
+  try {
+    db.exec(`ALTER TABLE sessions ADD COLUMN cash_amount REAL DEFAULT NULL`);
+    console.log('[DB] Added cash_amount column to sessions');
+  } catch { /* column already exists */ }
+  try {
+    db.exec(`ALTER TABLE sessions ADD COLUMN online_amount REAL DEFAULT NULL`);
+    console.log('[DB] Added online_amount column to sessions');
+  } catch { /* column already exists */ }
+  try {
+    db.exec(`ALTER TABLE sessions ADD COLUMN custom_amount REAL DEFAULT NULL`);
+    console.log('[DB] Added custom_amount column to sessions');
+  } catch { /* column already exists */ }
+  try {
+    db.exec(`ALTER TABLE sessions ADD COLUMN custom_comment TEXT DEFAULT NULL`);
+    console.log('[DB] Added custom_comment column to sessions');
+  } catch { /* column already exists */ }
+
   // Seed default owner account on first run
   const userCount = db.prepare('SELECT COUNT(*) as count FROM users').get();
   if (userCount.count === 0) {

@@ -274,13 +274,11 @@
     <div id="view-analytics" class="app-view">
       <div class="view-header">
         <div>
-          <h2 class="view-title">Occupancy Analytics</h2>
-          <p class="view-subtitle">Session history by machine and time</p>
+          <h2 class="view-title">Analytics</h2>
+          <p class="view-subtitle">Session history and occupancy</p>
         </div>
         <div class="analytics-controls">
-          <input type="date" id="analytics-date" onchange="loadAnalytics()" />
-          <button class="btn-refresh" onclick="loadAnalytics()">↻ Load</button>
-          <button class="btn-refresh owner-only" id="send-report-btn" onclick="sendDailyReport()" title="Email today's report to sitegamingcafe@gmail.com">✉ Send Report</button>
+          <button class="btn-refresh owner-only" id="send-report-btn" onclick="sendDailyReport()" title="Send report via email">✉ Send Report</button>
         </div>
       </div>
 
@@ -288,11 +286,11 @@
       <div class="summary-cards" id="summary-cards">
         <div class="summary-card">
           <div class="summary-value" id="s-sessions">–</div>
-          <div class="summary-label">Sessions Today</div>
+          <div class="summary-label" id="s-sessions-label">Sessions</div>
         </div>
         <div class="summary-card primary">
           <div class="summary-value" id="s-revenue">–</div>
-          <div class="summary-label">Total Revenue</div>
+          <div class="summary-label" id="s-revenue-label">Revenue</div>
         </div>
         <div class="summary-card">
           <div class="summary-value" id="s-machines">–</div>
@@ -300,9 +298,44 @@
         </div>
       </div>
 
-      <!-- Occupancy Grid -->
-      <div class="occupancy-container">
-        <div id="occupancy-grid"></div>
+      <!-- Payment Breakdown -->
+      <div class="payment-breakdown" id="payment-breakdown" style="display:none;">
+        <div class="pay-chip cash">
+          <span class="pay-chip-label">Cash</span>
+          <span class="pay-chip-val" id="s-cash">₹0</span>
+        </div>
+        <div class="pay-chip online">
+          <span class="pay-chip-label">Online</span>
+          <span class="pay-chip-val" id="s-online">₹0</span>
+        </div>
+      </div>
+
+      <!-- Tab Navigation -->
+      <div class="analytics-tabs">
+        <button class="analytics-tab active" id="tab-sessions" onclick="switchAnalyticsTab('sessions')">Sessions</button>
+        <button class="analytics-tab" id="tab-graph" onclick="switchAnalyticsTab('graph')">Graph</button>
+      </div>
+
+      <!-- Sessions Pane -->
+      <div id="analytics-pane-sessions" class="analytics-pane active">
+        <div class="period-toggle">
+          <button class="period-btn active" data-period="1D" onclick="setAnalyticsPeriod('1D')">1D</button>
+          <button class="period-btn" data-period="1W" onclick="setAnalyticsPeriod('1W')">1W</button>
+          <button class="period-btn" data-period="1M" onclick="setAnalyticsPeriod('1M')">1M</button>
+          <button class="period-btn" data-period="1Y" onclick="setAnalyticsPeriod('1Y')">1Y</button>
+        </div>
+        <div id="session-cards-container"></div>
+      </div>
+
+      <!-- Graph Pane -->
+      <div id="analytics-pane-graph" class="analytics-pane">
+        <div class="graph-controls">
+          <input type="date" id="analytics-date" onchange="loadAnalytics()" />
+          <button class="btn-refresh" onclick="loadAnalytics()">↻ Load</button>
+        </div>
+        <div class="occupancy-container">
+          <div id="occupancy-grid"></div>
+        </div>
       </div>
     </div>
 
@@ -341,6 +374,37 @@
     </div>
     <div class="modal-body" id="invoice-body">
       <!-- Injected by JS -->
+    </div>
+  </div>
+</div>
+
+<!-- ═══════════════════════════════════════════════════════════════════════════
+     PAYMENT MODAL
+════════════════════════════════════════════════════════════════════════════ -->
+<div id="payment-modal" class="modal-overlay" onclick="handleModalOverlayClick(event)">
+  <div class="modal-box modal-box-payment" role="dialog" aria-modal="true">
+    <div class="modal-header">
+      <h3>Payment method</h3>
+      <button class="modal-close" onclick="closeModal('payment-modal')" aria-label="Close">✕</button>
+    </div>
+    <div class="modal-body">
+      <div class="payment-total-row">
+        <span>Total</span>
+        <span id="payment-total-val">₹0</span>
+      </div>
+      <div class="payment-fields">
+        <div class="payment-field">
+          <label>Cash</label>
+          <input type="number" id="pay-cash" placeholder="Enter amount" min="0" oninput="onPaymentInput('cash')" />
+        </div>
+        <div class="payment-field">
+          <label>Online</label>
+          <input type="number" id="pay-online" placeholder="Enter amount" min="0" oninput="onPaymentInput('online')" />
+        </div>
+      </div>
+      <button class="btn-checkout" id="payment-confirm-btn" onclick="confirmPayment()">
+        End Session
+      </button>
     </div>
   </div>
 </div>
