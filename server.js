@@ -21,18 +21,19 @@ function todayIST() { return nowIST().toISOString().split('T')[0]; }
 
 // ── Pricing & Menu ──────────────────────────────────────────────────────────
 const PS5_RATES = {
-  1: parseFloat(process.env.PS5_RATE_1) || 79,
-  2: parseFloat(process.env.PS5_RATE_2) || 149,
-  3: parseFloat(process.env.PS5_RATE_3) || 199,
-  4: parseFloat(process.env.PS5_RATE_4) || 249,
+  1: parseFloat(process.env.PS5_RATE_1) || 95,
+  2: parseFloat(process.env.PS5_RATE_2) || 170,
+  3: parseFloat(process.env.PS5_RATE_3) || 240,
+  4: parseFloat(process.env.PS5_RATE_4) || 299,
 };
 
 const RATES = {
-  PC:  parseFloat(process.env.PC_RATE) || 59,
+  PC:  parseFloat(process.env.PC_RATE) || 70,
   PS5: PS5_RATES[1], // default (1-player rate) for display
 };
 
-const HAPPY_HOUR_RATE = parseFloat(process.env.HAPPY_HOUR_RATE) || 49;
+const HAPPY_HOUR_RATE     = parseFloat(process.env.HAPPY_HOUR_RATE)     || 49;
+const PS5_HAPPY_HOUR_RATE = parseFloat(process.env.PS5_HAPPY_HOUR_RATE) || 59;
 // Happy hours: strictly after 9:59 AM and strictly before 4:01 PM IST
 function isHappyHour() {
   const now = nowIST();
@@ -40,13 +41,41 @@ function isHappyHour() {
   return mins > 9 * 60 + 59 && mins < 16 * 60 + 1;
 }
 
+// Check happy hour for a specific UTC ISO timestamp
+function isHappyHourAt(isoString) {
+  const ms   = new Date(isoString).getTime() + IST_OFFSET_MS;
+  const mins = Math.floor(ms / 60000) % (24 * 60);
+  return mins > 9 * 60 + 59 && mins < 16 * 60;
+}
+
+// Per-hour billing: each 1h slot is charged based on when it STARTS.
+// Hours starting before 4:00 PM IST → happy hour rate; at/after 4:00 PM → normal rate.
+function mixedSessionCost(startTimeISO, plannedHours, machineType, playerCount, freeHalfHour) {
+  const players = playerCount || 1;
+  function rateAt(i) {
+    const slotISO = new Date(new Date(startTimeISO).getTime() + i * 3600000).toISOString();
+    const hh = isHappyHourAt(slotISO);
+    if (machineType === 'PS5') return hh ? PS5_HAPPY_HOUR_RATE * players : (PS5_RATES[players] || PS5_RATES[1]);
+    return hh ? HAPPY_HOUR_RATE : RATES.PC;
+  }
+  const full = Math.floor(plannedHours);
+  const frac = plannedHours - full;
+  let raw = 0;
+  for (let i = 0; i < full; i++) raw += rateAt(i);
+  if (frac > 0) raw += rateAt(full) * frac;
+  const discount       = plannedHours >= 3 ? 0.10 : 0;
+  const freeHalfCredit = freeHalfHour ? rateAt(0) * 0.5 : 0;
+  return Math.max(0, raw * (1 - discount) - freeHalfCredit);
+}
+
 const MENU = {
   chips: [
     { name: 'Chips', price: 10 },
+    { name: 'LCP',   price: 15 },
   ],
   drinks: [
     { name: 'Water',     price: 10  },
-    { name: 'Red Bull',  price: 125 },
+    { name: 'Energy Drink', price: 125 },
     { name: 'Thums-Up', price: 20  },
   ],
 };
@@ -159,8 +188,9 @@ const CAFE_EMAIL = [
   'jaygori12@gmail.com',
 ];
 
-function getDailyReportData(dateStr) {
-  const sessions = db.prepare(`
+// fromTime / toTime are 'HH:MM' in IST. toDateStr overrides the end date for cross-day ranges.
+function getDailyReportData(dateStr, fromTime = null, toTime = null, toDateStr = null) {
+  const selectCols = `
     SELECT
       s.id, s.machine_id, s.machine_type, s.customer_name,
       s.players, s.start_time, s.end_time, s.status,
@@ -170,10 +200,25 @@ function getDailyReportData(dateStr) {
         'item_name', o.item_name, 'item_type', o.item_type,
         'quantity',  o.quantity,  'unit_price', o.unit_price
       )) FROM orders o WHERE o.session_id = s.id) AS orders_json
-    FROM sessions s
-    WHERE date(datetime(s.start_time, '+5 hours', '30 minutes')) = ?
-    ORDER BY s.machine_id, s.start_time
-  `).all(dateStr);
+    FROM sessions s WHERE `;
+
+  let sql, params;
+  if (fromTime) {
+    // datetime-range filter (same-day or cross-day)
+    sql    = selectCols + `datetime(s.start_time, '+5 hours', '30 minutes') >= ?`;
+    params = [`${dateStr} ${fromTime}:00`];
+    if (toTime) {
+      sql += ` AND datetime(s.start_time, '+5 hours', '30 minutes') < ?`;
+      params.push(`${toDateStr || dateStr} ${toTime}:00`);
+    }
+  } else {
+    // full-day filter
+    sql    = selectCols + `date(datetime(s.start_time, '+5 hours', '30 minutes')) = ?`;
+    params = [dateStr];
+  }
+  sql += ` ORDER BY s.machine_id, s.start_time`;
+
+  const sessions = db.prepare(sql).all(...params);
 
   sessions.forEach(s => {
     try { s.orders = JSON.parse(s.orders_json || '[]').filter(o => o.item_name); }
@@ -187,10 +232,9 @@ function getDailyReportData(dateStr) {
 
     s.billable_hours   = s.planned_hours;
     s.discount_pct     = s.billable_hours >= 3 ? 10 : 0;
-    const freeHalfCredit = s.free_half_hour ? s.rate_per_hour * 0.5 : 0;
-    s.session_cost     = Math.max(0, s.billable_hours * s.rate_per_hour * (1 - s.discount_pct / 100) - freeHalfCredit);
+    s.session_cost     = mixedSessionCost(s.start_time, s.billable_hours, s.machine_type, s.players || 1, s.free_half_hour);
     s.order_total      = s.orders.reduce((t, o) => t + o.quantity * o.unit_price, 0);
-    s.grand_total      = s.custom_amount > 0 ? s.custom_amount : s.session_cost + s.order_total;
+    s.grand_total      = s.custom_amount != null ? s.custom_amount : s.session_cost + s.order_total;
     s.end_display      = s.end_time || new Date(endMs).toISOString();
   });
 
@@ -379,7 +423,7 @@ function buildDailyReportHtml(dateStr, sessions) {
     const rows = items.map(([name, data]) => `
       <tr style="border-top:1px solid #222;">
         <td style="padding:8px;color:#ccc;font-size:12px;">${name}</td>
-        <td style="padding:8px;color:#555;font-size:11px;text-align:center;">${data.type === 'chips' ? '🍟 Chips' : '🥤 Drink'}</td>
+        <td style="padding:8px;color:#555;font-size:11px;text-align:center;">${data.type === 'chips' ? '🍟 Snacks' : '🥤 Drink'}</td>
         <td style="padding:8px;color:#aaa;font-size:12px;text-align:center;">${data.qty}</td>
         <td style="padding:8px;color:#bb88ff;font-size:12px;text-align:right;font-weight:600;">₹${data.revenue.toFixed(0)}</td>
       </tr>`).join('');
@@ -416,18 +460,29 @@ function buildDailyReportHtml(dateStr, sessions) {
 </body></html>`;
 }
 
-async function sendDailyReport(dateStr) {
-  const sessions = getDailyReportData(dateStr);
+async function sendDailyReport(dateStr, fromTime = null, toTime = null, toDateStr = null) {
+  const sessions = getDailyReportData(dateStr, fromTime, toTime, toDateStr);
   const html     = buildDailyReportHtml(dateStr, sessions);
 
-  const displayDate = new Date(dateStr + 'T00:00:00').toLocaleDateString('en-IN', {
+  const fmtD = d => new Date(d + 'T00:00:00').toLocaleDateString('en-IN', {
     weekday: 'short', day: 'numeric', month: 'short', year: 'numeric', timeZone: 'Asia/Kolkata',
   });
+  const displayDate = fmtD(dateStr);
+
+  let timeRange = '';
+  if (fromTime && toTime) {
+    if (toDateStr && toDateStr !== dateStr) {
+      const toDisplay = new Date(toDateStr + 'T00:00:00').toLocaleDateString('en-IN', { day: 'numeric', month: 'short', timeZone: 'Asia/Kolkata' });
+      timeRange = ` · ${fromTime} – ${toDisplay} ${toTime}`;
+    } else {
+      timeRange = ` · ${fromTime} – ${toTime}`;
+    }
+  }
 
   const mailOpts = {
     from:    `"The Site Gaming" <${process.env.EMAIL_FROM || process.env.EMAIL_USER}>`,
     to:      CAFE_EMAIL,
-    subject: `The Site — Daily Report · ${displayDate} · ₹${Math.round(sessions.reduce((t, s) => t + s.grand_total, 0)).toLocaleString('en-IN')}`,
+    subject: `The Site — Daily Report · ${displayDate}${timeRange} · ₹${Math.round(sessions.reduce((t, s) => t + s.grand_total, 0)).toLocaleString('en-IN')}`,
     html,
   };
 
@@ -452,10 +507,10 @@ function scheduleDailyReport() {
     return target.getTime() - nowIST_.getTime();
   }
 
-  function scheduleAt(h, m, label) {
+  function scheduleAt(h, m, label, fromTime = null, toTime = null) {
     function runAndReschedule() {
       const dateStr = todayIST();
-      sendDailyReport(dateStr).catch(err =>
+      sendDailyReport(dateStr, fromTime, toTime).catch(err =>
         console.error(`[REPORT] Failed to send ${label} report:`, err.message)
       );
       setTimeout(runAndReschedule, msUntilNextIST(h, m));
@@ -465,8 +520,24 @@ function scheduleDailyReport() {
     console.log(`[REPORT] ${label} report scheduled (in ~${mins} min)`);
   }
 
-  scheduleAt(16,  0, '4:00 PM');
-  scheduleAt(23, 59, '11:59 PM');
+  // Overnight report: fires at 9 AM, covers yesterday 9 AM → today 9 AM
+  function scheduleOvernightReport() {
+    function runAndReschedule() {
+      const todayStr     = todayIST();
+      const yesterdayStr = new Date(new Date(todayStr + 'T00:00:00').getTime() - 86400000)
+        .toISOString().split('T')[0];
+      sendDailyReport(yesterdayStr, '09:00', '09:00', todayStr).catch(err =>
+        console.error('[REPORT] Failed to send 9:00 AM overnight report:', err.message)
+      );
+      setTimeout(runAndReschedule, msUntilNextIST(9, 0));
+    }
+    setTimeout(runAndReschedule, msUntilNextIST(9, 0));
+    const mins = Math.round(msUntilNextIST(9, 0) / 60000);
+    console.log(`[REPORT] 9:00 AM overnight report scheduled (in ~${mins} min)`);
+  }
+
+  scheduleAt(16, 0, '4:00 PM', '09:00', '16:00');
+  scheduleOvernightReport();
 }
 
 // ── Auth Middleware ──────────────────────────────────────────────────────────
@@ -611,18 +682,32 @@ app.get('/api/machines', auth, (req, res) => {
     }
 
     const happyHour = isHappyHour();
-    const happyRates = { 1: HAPPY_HOUR_RATE, 2: HAPPY_HOUR_RATE * 2, 3: HAPPY_HOUR_RATE * 3, 4: HAPPY_HOUR_RATE * 4 };
+    const happyRates = { 1: PS5_HAPPY_HOUR_RATE, 2: PS5_HAPPY_HOUR_RATE * 2, 3: PS5_HAPPY_HOUR_RATE * 3, 4: PS5_HAPPY_HOUR_RATE * 4 };
 
     return {
       ...machine,
-      rate: happyHour ? HAPPY_HOUR_RATE : (machine.type === 'PS5' ? PS5_RATES[1] : RATES.PC),
+      rate: happyHour ? (machine.type === 'PS5' ? PS5_HAPPY_HOUR_RATE : HAPPY_HOUR_RATE) : (machine.type === 'PS5' ? PS5_RATES[1] : RATES.PC),
       ps5Rates: machine.type === 'PS5' ? (happyHour ? happyRates : PS5_RATES) : undefined,
       session: session || null,
       status: session ? 'occupied' : 'available',
     };
   });
 
-  res.json({ machines, menu: MENU, rates: RATES, offers: { freeHalfHour: process.env.OFFER_FREE_HALF_HOUR === 'true', happyHour: isHappyHour(), happyHourRate: HAPPY_HOUR_RATE } });
+  res.json({ machines, menu: MENU, rates: RATES, offers: { freeHalfHour: process.env.OFFER_FREE_HALF_HOUR === 'true', happyHour: isHappyHour(), happyHourRate: HAPPY_HOUR_RATE, ps5HappyHourRate: PS5_HAPPY_HOUR_RATE, ps5Rates: PS5_RATES } });
+});
+
+app.get('/api/customers/search', auth, (req, res) => {
+  const q = (req.query.q || '').trim();
+  if (!q) return res.json([]);
+  const rows = db.prepare(`
+    SELECT customer_name AS name, customer_phone AS phone
+    FROM sessions
+    WHERE customer_name LIKE ? AND customer_name != ''
+    GROUP BY customer_name, customer_phone
+    ORDER BY MAX(start_time) DESC
+    LIMIT 10
+  `).all(`%${q}%`);
+  res.json(rows);
 });
 
 app.post('/api/sessions', auth, (req, res) => {
@@ -648,7 +733,7 @@ app.post('/api/sessions', auth, (req, res) => {
   }
 
   const rate = isHappyHour()
-    ? (machine.type === 'PS5' ? HAPPY_HOUR_RATE * playerCount : HAPPY_HOUR_RATE)
+    ? (machine.type === 'PS5' ? PS5_HAPPY_HOUR_RATE * playerCount : HAPPY_HOUR_RATE)
     : (machine.type === 'PS5' ? (PS5_RATES[playerCount] || PS5_RATES[1]) : RATES.PC);
   const startTime = new Date().toISOString();
 
@@ -783,7 +868,14 @@ app.post('/api/sessions/:id/extend', auth, (req, res) => {
   const session = db.prepare(`SELECT * FROM sessions WHERE id = ? AND status = 'active'`).get(sessionId);
   if (!session) return res.status(404).json({ error: 'Active session not found' });
 
-  const price = 15;
+  const slotStartMs  = new Date(session.start_time).getTime() + session.planned_hours * 3600000;
+  const slotHourRate = (() => {
+    const hh      = isHappyHourAt(new Date(slotStartMs).toISOString());
+    const players = session.players || 1;
+    if (session.machine_type === 'PS5') return hh ? PS5_HAPPY_HOUR_RATE * players : (PS5_RATES[players] || PS5_RATES[1]);
+    return hh ? HAPPY_HOUR_RATE : RATES.PC;
+  })();
+  const price = Math.ceil(slotHourRate / 4);
 
   const extCount = db.prepare(`SELECT COUNT(*) as c FROM orders WHERE session_id = ? AND item_type = 'extension'`).get(sessionId).c;
   const label = extCount === 0 ? '+15 min' : `+15 min ×${extCount + 1}`;
@@ -812,18 +904,22 @@ app.post('/api/sessions/:id/checkout', auth, (req, res) => {
   const extCount        = orders.filter(o => o.item_type === 'extension').length;
   const roundedBillable = session.planned_hours - extCount * 0.25;
   const discount        = roundedBillable >= 3 ? 0.10 : 0;
-  const freeHalfCredit  = session.free_half_hour ? session.rate_per_hour * 0.5 : 0;
-  const sessionCost     = Math.max(0, roundedBillable * session.rate_per_hour * (1 - discount) - freeHalfCredit);
+  const sessionCost     = mixedSessionCost(session.start_time, roundedBillable, session.machine_type, session.players || 1, session.free_half_hour);
+  const firstHourRate   = isHappyHourAt(session.start_time)
+    ? (session.machine_type === 'PS5' ? PS5_HAPPY_HOUR_RATE * (session.players || 1) : HAPPY_HOUR_RATE)
+    : (session.machine_type === 'PS5' ? (PS5_RATES[session.players || 1] || PS5_RATES[1]) : RATES.PC);
+  const freeHalfCredit  = session.free_half_hour ? firstHourRate * 0.5 : 0;
   const orderTotal      = orders.reduce((s, o) => s + o.quantity * o.unit_price, 0);
-  const customAmount    = parseFloat(req.body?.custom_amount) || 0;
+  const hasCustom       = req.body?.custom_amount != null && req.body?.custom_amount !== '';
+  const customAmount    = hasCustom ? parseFloat(req.body.custom_amount) : null;
   const customComment   = req.body?.custom_comment || '';
   const cashAmount      = parseFloat(req.body?.cash_amount) || 0;
   const onlineAmount    = parseFloat(req.body?.online_amount) || 0;
-  const grandTotal      = customAmount > 0 ? customAmount : sessionCost + orderTotal;
+  const grandTotal      = hasCustom ? customAmount : sessionCost + orderTotal;
 
   db.prepare(`
     UPDATE sessions SET status = 'completed', end_time = ?, cash_amount = ?, online_amount = ?, custom_amount = ?, custom_comment = ? WHERE id = ?
-  `).run(endTime, cashAmount || null, onlineAmount || null, customAmount || null, customComment || null, sessionId);
+  `).run(endTime, cashAmount || null, onlineAmount || null, customAmount, customComment || null, sessionId);
 
   res.json({
     invoice: {
@@ -844,12 +940,24 @@ app.post('/api/sessions/:id/checkout', auth, (req, res) => {
       orders,
       order_total:     orderTotal,
       grand_total:     grandTotal,
-      custom_amount:   customAmount > 0 ? customAmount : null,
-      custom_comment:  customAmount > 0 ? customComment : null,
+      custom_amount:   hasCustom ? customAmount : null,
+      custom_comment:  hasCustom ? customComment : null,
       cash_amount:     cashAmount > 0 ? cashAmount : null,
       online_amount:   onlineAmount > 0 ? onlineAmount : null,
     },
   });
+});
+
+app.delete('/api/sessions/:id', auth, (req, res) => {
+  if (req.user.username !== 'STARK') {
+    return res.status(403).json({ error: 'Not authorized' });
+  }
+  const sessionId = parseInt(req.params.id);
+  const session = db.prepare('SELECT id FROM sessions WHERE id = ?').get(sessionId);
+  if (!session) return res.status(404).json({ error: 'Session not found' });
+  db.prepare('DELETE FROM orders WHERE session_id = ?').run(sessionId);
+  db.prepare('DELETE FROM sessions WHERE id = ?').run(sessionId);
+  res.json({ ok: true });
 });
 
 // ── Analytics Route ──────────────────────────────────────────────────────────
@@ -859,12 +967,11 @@ app.get('/api/analytics', auth, ownerOnly, (req, res) => {
   const sessions = db.prepare(`
     SELECT
       s.id, s.machine_id, s.machine_type, s.customer_name,
-      s.start_time, s.planned_hours, s.end_time, s.status, s.rate_per_hour,
+      s.players, s.start_time, s.planned_hours, s.end_time, s.status, s.rate_per_hour,
       s.free_half_hour, s.cash_amount, s.online_amount,
       COALESCE((
         SELECT SUM(o.quantity * o.unit_price) FROM orders o WHERE o.session_id = s.id
-      ), 0) AS order_total,
-      (s.planned_hours * s.rate_per_hour) AS session_cost
+      ), 0) AS order_total
     FROM sessions s
     WHERE date(datetime(s.start_time, '+5 hours', '30 minutes')) = ?
     ORDER BY s.machine_id, s.start_time
@@ -872,12 +979,7 @@ app.get('/api/analytics', auth, ownerOnly, (req, res) => {
 
   const summary = {
     total_sessions:  sessions.length,
-    total_revenue:   sessions.reduce((sum, s) => {
-      const discount       = s.planned_hours >= 3 ? 0.10 : 0;
-      const freeHalfCredit = s.free_half_hour ? s.rate_per_hour * 0.5 : 0;
-      const sessionCost    = Math.max(0, s.planned_hours * s.rate_per_hour * (1 - discount) - freeHalfCredit);
-      return sum + sessionCost + s.order_total;
-    }, 0),
+    total_revenue:   sessions.reduce((sum, s) => sum + calcSessionCost(s) + s.order_total, 0),
     machines_used:   [...new Set(sessions.map(s => s.machine_id))].length,
     total_cash:      sessions.reduce((t, s) => t + (s.cash_amount || 0), 0),
     total_online:    sessions.reduce((t, s) => t + (s.online_amount || 0), 0),
@@ -898,20 +1000,24 @@ function getDateRange(period) {
 }
 
 function calcSessionCost(s) {
-  const discount       = s.planned_hours >= 3 ? 0.10 : 0;
-  const freeHalfCredit = s.free_half_hour ? s.rate_per_hour * 0.5 : 0;
-  return Math.max(0, s.planned_hours * s.rate_per_hour * (1 - discount) - freeHalfCredit);
+  return mixedSessionCost(s.start_time, s.planned_hours, s.machine_type, s.players || 1, s.free_half_hour);
 }
 
 app.get('/api/analytics/range', auth, ownerOnly, (req, res) => {
-  const period = req.query.period || '1D';
-  const { from, to } = getDateRange(period);
+  let from, to, period;
+  if (req.query.from && req.query.to) {
+    from = req.query.from;
+    to   = req.query.to;
+  } else {
+    period = req.query.period || '1D';
+    ({ from, to } = getDateRange(period));
+  }
 
   const sessions = db.prepare(`
     SELECT
       s.id, s.machine_id, s.machine_type, s.customer_name, s.customer_phone,
       s.players, s.start_time, s.end_time, s.planned_hours, s.status,
-      s.rate_per_hour, s.free_half_hour, s.cash_amount, s.online_amount,
+      s.rate_per_hour, s.free_half_hour, s.cash_amount, s.online_amount, s.custom_amount, s.custom_comment,
       COALESCE((
         SELECT SUM(o.quantity * o.unit_price) FROM orders o WHERE o.session_id = s.id
       ), 0) AS order_total
@@ -922,7 +1028,7 @@ app.get('/api/analytics/range', auth, ownerOnly, (req, res) => {
 
   const summary = {
     total_sessions: sessions.length,
-    total_revenue:  sessions.reduce((t, s) => t + calcSessionCost(s) + s.order_total, 0),
+    total_revenue:  sessions.reduce((t, s) => t + (s.custom_amount != null ? s.custom_amount : calcSessionCost(s) + s.order_total), 0),
     machines_used:  [...new Set(sessions.map(s => s.machine_id))].length,
     total_cash:     sessions.reduce((t, s) => t + (s.cash_amount || 0), 0),
     total_online:   sessions.reduce((t, s) => t + (s.online_amount || 0), 0),
@@ -932,10 +1038,17 @@ app.get('/api/analytics/range', auth, ownerOnly, (req, res) => {
 });
 
 // ── Range Report Builder ──────────────────────────────────────────────────────
-async function sendRangeReport(period) {
-  const { from, to } = getDateRange(period);
-  const periodLabels = { '1W': 'Last 7 Days', '1M': 'Last 30 Days', '1Y': 'Last Year' };
-  const label = periodLabels[period] || period;
+async function sendRangeReport(period, customFrom, customTo) {
+  let from, to, label;
+  if (customFrom && customTo) {
+    from  = customFrom;
+    to    = customTo;
+    label = `${from} to ${to}`;
+  } else {
+    ({ from, to } = getDateRange(period));
+    const periodLabels = { '1W': 'Last 7 Days', '1M': 'Last 30 Days', '1Y': 'Last Year' };
+    label = periodLabels[period] || period;
+  }
 
   const sessions = db.prepare(`
     SELECT
@@ -951,7 +1064,7 @@ async function sendRangeReport(period) {
     ORDER BY s.start_time DESC
   `).all(from, to);
 
-  const totalRevenue  = sessions.reduce((t, s) => t + (s.custom_amount > 0 ? s.custom_amount : calcSessionCost(s) + s.order_total), 0);
+  const totalRevenue  = sessions.reduce((t, s) => t + (s.custom_amount != null ? s.custom_amount : calcSessionCost(s) + s.order_total), 0);
   const totalCash     = sessions.reduce((t, s) => t + (s.cash_amount   || 0), 0);
   const totalOnline   = sessions.reduce((t, s) => t + (s.online_amount || 0), 0);
   const machinesUsed  = [...new Set(sessions.map(s => s.machine_id))].length;
@@ -977,7 +1090,7 @@ async function sendRangeReport(period) {
         <td style="padding:8px;color:#ccc;font-size:12px;">${s.customer_name || 'Walk-in'}</td>
         <td style="padding:8px;color:#aaa;font-size:12px;">${fmtTime(s.start_time)}</td>
         <td style="padding:8px;color:#aaa;font-size:12px;">${s.planned_hours}h × ₹${s.rate_per_hour}</td>
-        <td style="padding:8px;color:#A6FF00;font-size:12px;text-align:right;">₹${Math.round(s.custom_amount > 0 ? s.custom_amount : calcSessionCost(s) + s.order_total)}</td>
+        <td style="padding:8px;color:#A6FF00;font-size:12px;text-align:right;">₹${Math.round(s.custom_amount != null ? s.custom_amount : calcSessionCost(s) + s.order_total)}</td>
       </tr>
       ${s.custom_comment ? `<tr><td colspan="5" style="padding:2px 8px 6px 20px;color:#f59e0b;font-size:11px;font-style:italic;">↳ Note: ${s.custom_comment}</td></tr>` : ''}`).join('');
     return `
@@ -1050,13 +1163,16 @@ async function sendRangeReport(period) {
 
 // ── Report API (manual trigger, owner only) ───────────────────────────────────
 app.post('/api/report/send', auth, ownerOnly, async (req, res) => {
-  const { date, period } = req.body || {};
+  const { date, period, from, to } = req.body || {};
 
   try {
-    if (period && period !== '1D') {
+    if (from && to) {
+      const result = await sendRangeReport(null, from, to);
+      res.json({ message: `Range report (${from} to ${to}) ${result.skipped ? 'logged to console' : 'sent to ' + CAFE_EMAIL}`, ...result });
+    } else if (period && period !== '1D') {
       const result = await sendRangeReport(period);
-      const { from, to } = getDateRange(period);
-      res.json({ message: `Range report (${period}: ${from} to ${to}) ${result.skipped ? 'logged to console' : 'sent to ' + CAFE_EMAIL}`, ...result });
+      const { from: f, to: t } = getDateRange(period);
+      res.json({ message: `Range report (${period}: ${f} to ${t}) ${result.skipped ? 'logged to console' : 'sent to ' + CAFE_EMAIL}`, ...result });
     } else {
       const dateStr = date || todayIST();
       const result  = await sendDailyReport(dateStr);

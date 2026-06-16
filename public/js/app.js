@@ -18,6 +18,42 @@ const state = {
 };
 
 // ═══════════════════════════════════════════════════════════════════════════════
+// MIXED PRICING HELPER
+// Each 1-hour block is billed at the rate applicable when that block STARTS:
+// before 4:00 PM IST → happy hour rate; at/after 4:00 PM → normal rate.
+// ═══════════════════════════════════════════════════════════════════════════════
+function calcMixedCost(startTimeISO, plannedHours, machineType, playerCount, freeHalfHour) {
+  const IST_MS    = 5.5 * 60 * 60 * 1000;
+  const players   = playerCount || 1;
+  const happyRate    = state.offers?.happyHourRate    ?? 49;
+  const ps5HappyRate = state.offers?.ps5HappyHourRate ?? 59;
+  const pcRate       = state.rates?.PC ?? 59;
+  const ps5Rates     = state.offers?.ps5Rates ?? { 1: 79, 2: 149, 3: 199, 4: 249 };
+
+  function isHHAt(iso) {
+    const ms   = new Date(iso).getTime() + IST_MS;
+    const mins = Math.floor(ms / 60000) % (24 * 60);
+    return mins > 9 * 60 + 59 && mins < 16 * 60;
+  }
+  function rateAt(i) {
+    const slotISO = new Date(new Date(startTimeISO).getTime() + i * 3600000).toISOString();
+    const hh = isHHAt(slotISO);
+    if (machineType === 'PS5') return hh ? ps5HappyRate * players : (ps5Rates[players] || ps5Rates[1]);
+    return hh ? happyRate : pcRate;
+  }
+
+  const full = Math.floor(plannedHours);
+  const frac = plannedHours - full;
+  let raw = 0;
+  for (let i = 0; i < full; i++) raw += rateAt(i);
+  if (frac > 0) raw += rateAt(full) * frac;
+
+  const discount       = plannedHours >= 3 ? 0.10 : 0;
+  const freeHalfCredit = freeHalfHour ? rateAt(0) * 0.5 : 0;
+  return Math.max(0, raw * (1 - discount) - freeHalfCredit);
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
 // API HELPER
 // ═══════════════════════════════════════════════════════════════════════════════
 async function api(method, endpoint, data) {
@@ -187,8 +223,9 @@ function switchView(viewName, el) {
 
   if (viewName === 'dashboard') loadDashboard();
   if (viewName === 'analytics') {
-    if (state.analyticsTab === 'graph') loadAnalytics();
-    else loadSessionCards();
+    if (state.analyticsTab === 'graph')       loadAnalytics();
+    else if (state.analyticsTab === 'charts') loadCharts();
+    else                                      loadSessionCards();
   }
 
   closeSidebar();
@@ -215,6 +252,7 @@ async function loadDashboard() {
     const data    = await api('GET', '/api/machines');
     state.machines = data.machines;
     state.menu     = data.menu;
+    state.rates    = data.rates || {};
     state.offers   = data.offers || {};
     renderMachineStatuses();
     updateStatusBar();
@@ -350,6 +388,7 @@ function openMachineModal(machineId) {
     badge.className   = 'modal-badge available';
     body.innerHTML    = buildStartBody(machine);
     modalBox.classList.remove('modal-box-session');
+    setupCustomerAutocomplete();
   }
 
   modal.classList.add('active');
@@ -388,7 +427,10 @@ function buildStartBody(machine) {
   return `
     <div class="form-group">
       <label>Customer Name <span style="color:var(--text-dim)">(optional)</span></label>
-      <input type="text" id="customer-name" placeholder="Walk-in customer" maxlength="60" />
+      <div class="autocomplete-wrap">
+        <input type="text" id="customer-name" placeholder="Walk-in customer" maxlength="60" autocomplete="off" />
+        <div class="autocomplete-dropdown" id="customer-dropdown"></div>
+      </div>
     </div>
     <div class="form-group">
       <label>Phone <span style="color:var(--text-dim)">(optional)</span></label>
@@ -433,6 +475,54 @@ function buildStartBody(machine) {
   `;
 }
 
+// ── Customer Autocomplete ────────────────────────────────────────────────────
+function setupCustomerAutocomplete() {
+  const nameInput = document.getElementById('customer-name');
+  const phoneInput = document.getElementById('customer-phone');
+  const dropdown = document.getElementById('customer-dropdown');
+  if (!nameInput || !dropdown) return;
+
+  let debounceTimer;
+
+  nameInput.addEventListener('input', () => {
+    clearTimeout(debounceTimer);
+    const q = nameInput.value.trim();
+    if (!q) { closeDropdown(); return; }
+    debounceTimer = setTimeout(async () => {
+      try {
+        const results = await api('GET', `/api/customers/search?q=${encodeURIComponent(q)}`);
+        if (!results.length) { closeDropdown(); return; }
+        dropdown.innerHTML = results.map((c, i) =>
+          `<div class="autocomplete-item" data-index="${i}" data-name="${escHtml(c.name)}" data-phone="${escHtml(c.phone || '')}">
+            <span class="autocomplete-item-name">${escHtml(c.name)}</span>
+            <span class="autocomplete-item-phone">${escHtml(c.phone || '—')}</span>
+          </div>`
+        ).join('');
+        dropdown.querySelectorAll('.autocomplete-item').forEach(item => {
+          item.addEventListener('mousedown', e => {
+            e.preventDefault();
+            nameInput.value = item.dataset.name;
+            phoneInput.value = item.dataset.phone;
+            closeDropdown();
+          });
+        });
+        dropdown.classList.add('open');
+      } catch (_) { closeDropdown(); }
+    }, 200);
+  });
+
+  nameInput.addEventListener('blur', () => setTimeout(closeDropdown, 150));
+
+  function closeDropdown() {
+    dropdown.classList.remove('open');
+    dropdown.innerHTML = '';
+  }
+
+  function escHtml(str) {
+    return str.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
+  }
+}
+
 // ── Active Session Form ──────────────────────────────────────────────────────
 function renderSummaryOrderRows(orders) {
   const exts    = (orders || []).filter(o => o.item_type === 'extension');
@@ -468,7 +558,7 @@ function buildSessionBody(machine) {
   const baseHours   = s.planned_hours - extCount * 0.25;
   const discount    = baseHours >= 3 ? 0.10 : 0;
   const freeHalf    = s.free_half_hour ? s.rate_per_hour * 0.5 : 0;
-  const sessionCost = Math.max(0, baseHours * s.rate_per_hour * (1 - discount) - freeHalf);
+  const sessionCost = calcMixedCost(s.start_time, baseHours, s.machine_type, s.players, s.free_half_hour);
   const orderCost   = (s.orders || []).reduce((t, o) => t + o.quantity * o.unit_price, 0);
 
   state.savedOrderCounts = {};
@@ -524,7 +614,7 @@ function buildSessionBody(machine) {
         </div>
 
         <div class="form-group" style="margin-top:8px;">
-          <label>Extend <span style="color:var(--text-dim)">(× 15 min · ₹15)</span></label>
+          <label>Extend <span style="color:var(--text-dim)">(× 15 min · ₹${Math.ceil(s.rate_per_hour / 4)})</span></label>
           <div class="hours-control">
             <button class="btn-icon" type="button" onclick="removeExtension(${s.id}, '${machine.id}')">−</button>
             <input type="text" id="ext-count-display" readonly value="${extCount}"
@@ -538,7 +628,7 @@ function buildSessionBody(machine) {
       <!-- MIDDLE: Add Items (single column) -->
       <div class="session-col-items">
         <div class="items-section-title">Add Items</div>
-        <div class="menu-category"><h5>Chips</h5>${chipsHtml}</div>
+        <div class="menu-category"><h5>Snacks</h5>${chipsHtml}</div>
         <div class="menu-category"><h5>Drinks</h5>${drinksHtml}</div>
       </div>
 
@@ -669,15 +759,17 @@ function onHoursChange(startTimeISO) {
   if (validUntilEl) validUntilEl.textContent = fmt12(end);
 
   // Update cost (hrs is already base hours)
+  const s           = machine.session;
   const discount    = hrs >= 3 ? 0.10 : 0;
-  const freeHalf    = machine.session.free_half_hour ? machine.session.rate_per_hour * 0.5 : 0;
-  const sessionCost = Math.max(0, hrs * machine.session.rate_per_hour * (1 - discount) - freeHalf);
+  const freeHalf    = s.free_half_hour ? s.rate_per_hour * 0.5 : 0;
+  const sessionCost = calcMixedCost(s.start_time, hrs, s.machine_type, s.players, s.free_half_hour);
+  const rawCost     = calcMixedCost(s.start_time, hrs, s.machine_type, s.players, false);
   const el = document.getElementById('session-cost-label');
   const eh = document.getElementById('session-cost-hrs');
   const ev = document.getElementById('session-cost-val');
   if (el) el.innerHTML = `Session${discount > 0 ? ' <span style="color:var(--warning);font-size:0.7rem">-10%</span>' : ''}${freeHalf > 0 ? ' <span style="color:var(--warning);font-size:0.7rem">½free</span>' : ''}`;
   if (eh) eh.textContent = `${hrs}h`;
-  if (ev) ev.innerHTML = `${(freeHalf > 0 || discount > 0) ? `<span style="text-decoration:line-through;color:var(--text-muted);font-size:0.8rem;margin-right:2px;">₹${(hrs * machine.session.rate_per_hour).toFixed(0)}</span>` : ''}₹${sessionCost.toFixed(0)}`;
+  if (ev) ev.innerHTML = `${(freeHalf > 0 || discount > 0) ? `<span style="text-decoration:line-through;color:var(--text-muted);font-size:0.8rem;margin-right:2px;">₹${rawCost.toFixed(0)}</span>` : ''}₹${sessionCost.toFixed(0)}`;
   updateRunningTotal();
 
   // Save to server — always send total planned (base + extensions)
@@ -773,8 +865,7 @@ function updateRunningTotal() {
   const extCount = (s.orders || []).filter(o => o.item_type === 'extension').length;
   // session-hours input now shows base hours (without extensions)
   const baseHrs  = parseFloat(document.getElementById('session-hours')?.value) || (s.planned_hours - extCount * 0.25);
-  const discount    = baseHrs >= 3 ? 0.10 : 0;
-  const sessionCost = baseHrs * s.rate_per_hour * (1 - discount);
+  const sessionCost = calcMixedCost(s.start_time, baseHrs, s.machine_type, s.players, s.free_half_hour);
   const prevOrders   = (s.orders || []).reduce((t, o) => t + o.quantity * o.unit_price, 0);
   const pendingCost  = calcPendingCost();
 
@@ -783,8 +874,10 @@ function updateRunningTotal() {
   const pendingRow = document.getElementById('pending-orders-row');
   const pendingVal = document.getElementById('pending-orders-val');
 
-  const customAmt = parseFloat(document.getElementById('custom-amount')?.value) || 0;
-  const displayTotal = customAmt > 0 ? `₹${customAmt.toFixed(0)}` : `₹${(sessionCost + prevOrders + pendingCost).toFixed(0)}`;
+  const _customEl = document.getElementById('custom-amount');
+  const _hasCustom = _customEl?.value !== '';
+  const customAmt  = _hasCustom ? (parseFloat(_customEl.value) || 0) : null;
+  const displayTotal = _hasCustom ? `₹${customAmt.toFixed(0)}` : `₹${(sessionCost + prevOrders + pendingCost).toFixed(0)}`;
 
   if (pendingRow) pendingRow.style.display = pendingCost > 0 ? '' : 'none';
   if (pendingVal) pendingVal.textContent = `₹${pendingCost.toFixed(0)}`;
@@ -936,9 +1029,11 @@ async function removeExtension(sessionId, machineId) {
 }
 
 async function checkout(sessionId) {
-  const customAmt = parseFloat(document.getElementById('custom-amount')?.value) || 0;
+  const _custEl    = document.getElementById('custom-amount');
+  const hasCustom  = _custEl?.value !== '';
+  const customAmt  = hasCustom ? (parseFloat(_custEl.value) || 0) : null;
   const customComment = (document.getElementById('custom-comment')?.value || '').trim();
-  if (customAmt > 0 && !customComment) {
+  if (hasCustom && !customComment) {
     showToast('Please enter a comment for the custom amount', 'error');
     document.getElementById('custom-comment')?.focus();
     return;
@@ -947,10 +1042,16 @@ async function checkout(sessionId) {
   // Save any pending orders first
   const machine = getMachineFromModal();
   if (machine?.session) {
-    const hrs = parseFloat(document.getElementById('session-hours')?.value);
+    const hrs = parseFloat(document.getElementById('session-hours')?.value) || 1;
+    const extCount = (machine.session.orders || []).filter(o => o.item_type === 'extension').length;
+    const baseHours = machine.session.planned_hours - extCount * 0.25;
+    const elapsed = (Date.now() - new Date(machine.session.start_time).getTime()) / 3600000;
     const pending = Object.entries(state.pendingOrders).filter(([, qty]) => qty > 0);
     try {
-      if (hrs) await api('PUT', `/api/sessions/${sessionId}`, { planned_hours: hrs });
+      if (hrs !== baseHours) {
+        const safeHrs = Math.max(hrs, Math.ceil(elapsed));
+        await api('PUT', `/api/sessions/${sessionId}`, { planned_hours: safeHrs });
+      }
       if (pending.length > 0 && state.menu) {
         for (const [name, qty] of pending) {
           await api('POST', `/api/sessions/${sessionId}/orders`, {
@@ -968,20 +1069,26 @@ async function checkout(sessionId) {
     ? customAmt
     : parseFloat(document.getElementById('running-total')?.textContent?.replace(/[^\d.]/g, '')) || 0;
 
+  // Reset button — disabled until user enters an amount
+  const payBtn = document.getElementById('payment-confirm-btn');
+  if (payBtn) { payBtn.disabled = true; payBtn.textContent = 'End Session'; }
+
   // Store checkout context and open payment modal
-  state.pendingCheckout = { sessionId, customAmt, customComment };
+  state.pendingCheckout = { sessionId, customAmt, customComment, hasCustom };
   document.getElementById('payment-total-val').textContent = `₹${total.toFixed(0)}`;
-  document.getElementById('pay-cash').value = total.toFixed(0);
-  document.getElementById('pay-online').value = 0;
+  document.getElementById('pay-cash').value = '';
+  document.getElementById('pay-online').value = '';
   document.getElementById('payment-modal').classList.add('active');
 }
 
 async function confirmPayment() {
-  const { sessionId, customAmt, customComment } = state.pendingCheckout || {};
+  const { sessionId, customAmt, customComment, hasCustom } = state.pendingCheckout || {};
   if (!sessionId) return;
 
-  const cashAmt   = parseFloat(document.getElementById('pay-cash')?.value) || 0;
+  const total     = parseFloat(document.getElementById('payment-total-val')?.textContent?.replace(/[^\d.]/g, '')) || 0;
+  const cashRaw   = parseFloat(document.getElementById('pay-cash')?.value) || 0;
   const onlineAmt = parseFloat(document.getElementById('pay-online')?.value) || 0;
+  const cashAmt   = Math.min(cashRaw, total);
 
   const btn = document.getElementById('payment-confirm-btn');
   btn.disabled = true;
@@ -989,7 +1096,7 @@ async function confirmPayment() {
 
   try {
     const body = {
-      ...(customAmt > 0 ? { custom_amount: customAmt, custom_comment: customComment } : {}),
+      ...(hasCustom ? { custom_amount: customAmt, custom_comment: customComment } : {}),
       ...(cashAmt   > 0 ? { cash_amount: cashAmt }     : {}),
       ...(onlineAmt > 0 ? { online_amount: onlineAmt } : {}),
     };
@@ -1006,18 +1113,34 @@ async function confirmPayment() {
 }
 
 function onPaymentInput(source) {
-  const total = parseFloat(document.getElementById('payment-total-val')?.textContent?.replace(/[^\d.]/g, '')) || 0;
-  const cashEl   = document.getElementById('pay-cash');
-  const onlineEl = document.getElementById('pay-online');
+  const total     = parseFloat(document.getElementById('payment-total-val')?.textContent?.replace(/[^\d.]/g, '')) || 0;
+  const cashEl    = document.getElementById('pay-cash');
+  const onlineEl  = document.getElementById('pay-online');
+  const changeRow = document.getElementById('change-row');
+  const changeVal = document.getElementById('change-val');
+
   if (source === 'cash') {
-    const cash = Math.min(Math.max(parseFloat(cashEl.value) || 0, 0), total);
-    cashEl.value   = cash;
-    onlineEl.value = parseFloat((total - cash).toFixed(2));
+    const cash = Math.max(parseFloat(cashEl.value) || 0, 0);
+    if (cash > total) {
+      onlineEl.value = '';
+      const change = cash - total;
+      if (changeRow) changeRow.style.display = 'flex';
+      if (changeVal) changeVal.textContent = `₹${Math.round(change)}`;
+    } else {
+      onlineEl.value = parseFloat((total - cash).toFixed(2)) || '';
+      if (changeRow) changeRow.style.display = 'none';
+    }
   } else {
     const online = Math.min(Math.max(parseFloat(onlineEl.value) || 0, 0), total);
     onlineEl.value = online;
-    cashEl.value   = parseFloat((total - online).toFixed(2));
+    cashEl.value   = parseFloat((total - online).toFixed(2)) || '';
+    if (changeRow) changeRow.style.display = 'none';
   }
+
+  const cash   = parseFloat(cashEl.value)   || 0;
+  const online = parseFloat(onlineEl.value) || 0;
+  const btn = document.getElementById('payment-confirm-btn');
+  if (btn) btn.disabled = total > 0 && (cash + online) <= 0;
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -1082,6 +1205,16 @@ function showInvoice(inv) {
       <span>Grand Total</span>
       <span>₹${inv.grand_total.toFixed(0)}</span>
     </div>
+    ${inv.custom_amount != null ? `
+    <div style="margin-top:8px;padding:8px 10px;background:rgba(245,158,11,0.08);border:1px solid rgba(245,158,11,0.3);border-radius:6px;">
+      <div style="color:#f59e0b;font-size:0.78rem;font-weight:700;letter-spacing:0.05em;">OVERRIDE APPLIED</div>
+      <div style="display:flex;justify-content:space-between;margin-top:4px;font-size:0.85rem;">
+        <span style="color:var(--text-muted)">Custom charge</span>
+        <span style="color:#f59e0b;font-weight:700;">₹${inv.custom_amount.toFixed(0)}</span>
+      </div>
+      ${inv.custom_comment ? `<div style="margin-top:6px;color:var(--text-muted);font-size:0.78rem;font-style:italic;">Reason: ${inv.custom_comment}</div>` : ''}
+    </div>
+    ` : ''}
     ${(inv.cash_amount || inv.online_amount) ? `
     <div style="display:flex;gap:16px;margin-top:8px;font-size:0.82rem;color:var(--text-muted);">
       ${inv.cash_amount   ? `<span>Cash ₹${inv.cash_amount.toFixed(0)}</span>`     : ''}
@@ -1115,8 +1248,9 @@ function switchAnalyticsTab(tab) {
   document.querySelectorAll('.analytics-pane').forEach(p =>
     p.classList.toggle('active', p.id === `analytics-pane-${tab}`)
   );
-  if (tab === 'sessions') loadSessionCards();
-  else                    loadAnalytics();
+  if (tab === 'sessions')     loadSessionCards();
+  else if (tab === 'charts') loadCharts();
+  else                       loadAnalytics();
 }
 
 function setAnalyticsPeriod(period) {
@@ -1124,7 +1258,9 @@ function setAnalyticsPeriod(period) {
   document.querySelectorAll('.period-btn').forEach(b =>
     b.classList.toggle('active', b.dataset.period === period)
   );
-  loadSessionCards();
+  const customRange = document.getElementById('custom-date-range');
+  if (customRange) customRange.style.display = period === 'custom' ? 'flex' : 'none';
+  if (period !== 'custom') loadSessionCards();
 }
 
 // ── Send Report ──────────────────────────────────────────────────────────────
@@ -1134,7 +1270,13 @@ async function sendDailyReport() {
   const isSessionsTab = state.analyticsTab === 'sessions';
 
   let payload, label;
-  if (isSessionsTab && period !== '1D') {
+  if (isSessionsTab && period === 'custom') {
+    const from = document.getElementById('custom-from')?.value;
+    const to   = document.getElementById('custom-to')?.value;
+    if (!from || !to) { showToast('Select a custom date range first', 'error'); return; }
+    payload = { from, to };
+    label   = `${from} to ${to}`;
+  } else if (isSessionsTab && period !== '1D') {
     payload = { period };
     label   = period === '1W' ? 'Last 7 days' : period === '1M' ? 'Last 30 days' : 'Last year';
   } else {
@@ -1160,15 +1302,408 @@ async function sendDailyReport() {
   }
 }
 
+// ── Charts Tab ───────────────────────────────────────────────────────────────
+const CHART_COLORS = {
+  pc:      '#A6FF00',
+  ps5:     '#831EFF',
+  fnd:     '#f59e0b',
+  regular: '#A6FF00',
+  newCust: '#831EFF',
+  bar:     'rgba(166,255,0,0.8)',
+  barBorder: '#A6FF00',
+};
+
+function destroyChart(key) {
+  if (state.charts?.[key]) { state.charts[key].destroy(); state.charts[key] = null; }
+}
+
+function setChartPeriod(period) {
+  state.chartPeriod = period;
+  document.querySelectorAll('.chart-period-btn').forEach(b =>
+    b.classList.toggle('active', b.dataset.period === period)
+  );
+  const cr = document.getElementById('chart-custom-range');
+  if (cr) cr.style.display = period === 'custom' ? 'flex' : 'none';
+  if (period !== 'custom') loadCharts();
+}
+
+function getChartDateRange(period) {
+  const IST_MS = 5.5 * 60 * 60 * 1000;
+  const nowIST  = new Date(Date.now() + IST_MS);
+  const today   = nowIST.toISOString().split('T')[0];
+
+  // Current Sun→Sat week in IST
+  const todayUTC = new Date(today + 'T00:00:00Z');
+  const dow      = todayUTC.getUTCDay();
+  const sunDate  = new Date(todayUTC.getTime() - dow * 86400000);
+  const satDate  = new Date(sunDate.getTime() + 6 * 86400000);
+  const weekFrom = sunDate.toISOString().split('T')[0];
+  const weekTo   = satDate.toISOString().split('T')[0];
+
+  const y = nowIST.getUTCFullYear(), m = nowIST.getUTCMonth();
+  const monthFrom = new Date(Date.UTC(y, m, 1)).toISOString().split('T')[0];
+  const monthTo   = new Date(Date.UTC(y, m + 1, 0)).toISOString().split('T')[0];
+
+  if (period === '1D') {
+    // Pies: today only   Bar: current Sun→Sat
+    return {
+      pieRange: { from: today,    to: today   },
+      barRange: { from: weekFrom, to: weekTo, groupBy: 'day' },
+    };
+  }
+  if (period === '1W') {
+    // Pies: current Sun→Sat   Bar: current month by week
+    return {
+      pieRange: { from: weekFrom,  to: weekTo   },
+      barRange: { from: monthFrom, to: monthTo, groupBy: 'week' },
+    };
+  }
+  if (period === '1M') {
+    // Pies: current month   Bar: current quarter by month
+    const qs    = Math.floor(m / 3) * 3;
+    const qFrom = new Date(Date.UTC(y, qs,     1)).toISOString().split('T')[0];
+    const qTo   = new Date(Date.UTC(y, qs + 3, 0)).toISOString().split('T')[0];
+    return {
+      pieRange: { from: monthFrom, to: monthTo },
+      barRange: { from: qFrom,     to: qTo,     groupBy: 'month' },
+    };
+  }
+  if (period === '1Y') {
+    const yr = { from: `${y}-01-01`, to: `${y}-12-31` };
+    return {
+      pieRange: yr,
+      barRange: { ...yr, groupBy: 'month' },
+    };
+  }
+  if (period === 'custom') {
+    const from = document.getElementById('chart-from')?.value;
+    const to   = document.getElementById('chart-to')?.value;
+    if (!from || !to) return null;
+    return {
+      pieRange: { from, to },
+      barRange: { from, to, groupBy: 'day' },
+    };
+  }
+  return null;
+}
+
+async function loadCharts() {
+  if (!state.charts) state.charts = {};
+  if (window.Chart) {
+    Chart.defaults.color       = '#777';
+    Chart.defaults.borderColor = '#2e2e2e';
+    Chart.defaults.font.family = "'Segoe UI', Arial, sans-serif";
+  }
+
+  const period = state.chartPeriod || '1D';
+  const ranges = getChartDateRange(period);
+  if (!ranges) return;
+
+  const { pieRange, barRange } = ranges;
+  const sameRange = pieRange.from === barRange.from && pieRange.to === barRange.to;
+
+  let pieData, barData;
+  try {
+    if (sameRange) {
+      pieData = barData = await api('GET', `/api/analytics/range?from=${pieRange.from}&to=${pieRange.to}`);
+    } else {
+      [pieData, barData] = await Promise.all([
+        api('GET', `/api/analytics/range?from=${pieRange.from}&to=${pieRange.to}`),
+        api('GET', `/api/analytics/range?from=${barRange.from}&to=${barRange.to}`),
+      ]);
+    }
+  } catch (err) {
+    showToast(err.message, 'error');
+    return;
+  }
+
+  renderRevenuePie(pieData.sessions, pieRange);
+  renderCustomerPie(pieData.sessions, pieRange);
+  renderPaymentPie(pieData.sessions, pieRange);
+  renderBarChart(barData.sessions, barRange);
+}
+
+function fmtRangeLabel(range) {
+  const fmt = d => new Date(d + 'T12:00:00Z').toLocaleDateString('en-IN', { day: 'numeric', month: 'short' });
+  return `${fmt(range.from)} – ${fmt(range.to)}`;
+}
+
+function renderRevenuePie(sessions, range) {
+  destroyChart('revPie');
+  let pcRev = 0, ps5Rev = 0, fndRev = 0;
+  sessions.forEach(s => {
+    const gaming = s.custom_amount != null
+      ? s.custom_amount
+      : calcMixedCost(s.start_time, s.planned_hours, s.machine_type, s.players, s.free_half_hour);
+    if (s.machine_type === 'PS5') ps5Rev += gaming;
+    else                          pcRev  += gaming;
+    fndRev += (s.order_total || 0);
+  });
+
+  const total = pcRev + ps5Rev + fndRev;
+  const el = document.getElementById('chart-revenue-breakdown');
+  if (!el) return;
+  if (total === 0) { el.closest('.chart-canvas-wrap').innerHTML = '<div class="chart-loading">No data for this period</div>'; return; }
+
+  const sub = document.getElementById('chart-rev-subtitle');
+  if (sub) sub.textContent = `${fmtRangeLabel(range)} · PC ₹${Math.round(pcRev).toLocaleString('en-IN')} · PS5 ₹${Math.round(ps5Rev).toLocaleString('en-IN')} · F&D ₹${Math.round(fndRev).toLocaleString('en-IN')}`;
+
+  state.charts.revPie = new Chart(el, {
+    type: 'doughnut',
+    data: {
+      labels: ['PC', 'PlayStation', 'Food & Drinks'],
+      datasets: [{
+        data: [Math.round(pcRev), Math.round(ps5Rev), Math.round(fndRev)],
+        backgroundColor: [CHART_COLORS.pc, CHART_COLORS.ps5, CHART_COLORS.fnd],
+        borderColor: '#141414',
+        borderWidth: 3,
+        hoverOffset: 6,
+      }],
+    },
+    options: {
+      responsive: true,
+      maintainAspectRatio: false,
+      cutout: '62%',
+      plugins: {
+        legend: { position: 'bottom', labels: { color: '#aaa', padding: 16, boxWidth: 12 } },
+        tooltip: {
+          callbacks: {
+            label: ctx => ` ₹${ctx.parsed.toLocaleString('en-IN')}  (${Math.round(ctx.parsed / total * 100)}%)`,
+          },
+        },
+      },
+    },
+  });
+}
+
+function renderCustomerPie(sessions, range) {
+  destroyChart('custPie');
+  const counts = {};
+  sessions.forEach(s => {
+    const name = s.customer_name?.trim();
+    if (!name) return;
+    counts[name] = (counts[name] || 0) + 1;
+  });
+  let regular = 0, newCust = 0;
+  Object.values(counts).forEach(c => { if (c > 1) regular++; else newCust++; });
+
+  const el = document.getElementById('chart-customer-split');
+  if (!el) return;
+  if (regular + newCust === 0) { el.closest('.chart-canvas-wrap').innerHTML = '<div class="chart-loading">No named customers in this period</div>'; return; }
+
+  const sub = document.getElementById('chart-cust-subtitle');
+  if (sub) sub.textContent = `${fmtRangeLabel(range)} · ${regular + newCust} customers`;
+
+  state.charts.custPie = new Chart(el, {
+    type: 'doughnut',
+    data: {
+      labels: ['Regular', 'New'],
+      datasets: [{
+        data: [regular, newCust],
+        backgroundColor: [CHART_COLORS.regular, CHART_COLORS.newCust],
+        borderColor: '#141414',
+        borderWidth: 3,
+        hoverOffset: 6,
+      }],
+    },
+    options: {
+      responsive: true,
+      maintainAspectRatio: false,
+      cutout: '62%',
+      plugins: {
+        legend: { position: 'bottom', labels: { color: '#aaa', padding: 16, boxWidth: 12 } },
+        tooltip: {
+          callbacks: {
+            label: ctx => {
+              const total = regular + newCust;
+              return ` ${ctx.parsed} customer${ctx.parsed !== 1 ? 's' : ''}  (${Math.round(ctx.parsed / total * 100)}%)`;
+            },
+          },
+        },
+      },
+    },
+  });
+}
+
+function renderPaymentPie(sessions, range) {
+  destroyChart('payPie');
+  let cash = 0, online = 0;
+  sessions.forEach(s => {
+    cash   += s.cash_amount   || 0;
+    online += s.online_amount || 0;
+  });
+
+  const el = document.getElementById('chart-payment-split');
+  if (!el) return;
+  if (cash + online === 0) {
+    el.closest('.chart-canvas-wrap').innerHTML = '<div class="chart-loading">No payment data for this period</div>';
+    return;
+  }
+
+  const sub = document.getElementById('chart-payment-subtitle');
+  if (sub) sub.textContent = `${fmtRangeLabel(range)} · Cash ₹${Math.round(cash).toLocaleString('en-IN')} · Online ₹${Math.round(online).toLocaleString('en-IN')}`;
+
+  state.charts.payPie = new Chart(el, {
+    type: 'doughnut',
+    data: {
+      labels: ['Cash', 'Online'],
+      datasets: [{
+        data: [Math.round(cash), Math.round(online)],
+        backgroundColor: ['#f59e0b', '#38bdf8'],
+        borderColor: '#141414',
+        borderWidth: 3,
+        hoverOffset: 6,
+      }],
+    },
+    options: {
+      responsive: true,
+      maintainAspectRatio: false,
+      cutout: '62%',
+      plugins: {
+        legend: { position: 'bottom', labels: { color: '#aaa', padding: 16, boxWidth: 12 } },
+        tooltip: {
+          callbacks: {
+            label: ctx => {
+              const total = cash + online;
+              return ` ₹${ctx.parsed.toLocaleString('en-IN')}  (${Math.round(ctx.parsed / total * 100)}%)`;
+            },
+          },
+        },
+      },
+    },
+  });
+}
+
+function renderBarChart(sessions, { from, to, groupBy }) {
+  destroyChart('weekBar');
+  const IST_MS = 5.5 * 60 * 60 * 1000;
+
+  const sessionRev = s => (s.custom_amount != null
+    ? s.custom_amount
+    : calcMixedCost(s.start_time, s.planned_hours, s.machine_type, s.players, s.free_half_hour) + (s.order_total || 0));
+
+  let labels = [], values = [], subtitle = '', barTitle = 'Revenue';
+
+  if (groupBy === 'day') {
+    const dates = [];
+    let cur = new Date(from + 'T00:00:00Z');
+    const end = new Date(to + 'T00:00:00Z');
+    while (cur <= end) { dates.push(cur.toISOString().split('T')[0]); cur = new Date(cur.getTime() + 86400000); }
+    const rev = Object.fromEntries(dates.map(d => [d, 0]));
+    sessions.forEach(s => {
+      const day = new Date(new Date(s.start_time).getTime() + IST_MS).toISOString().split('T')[0];
+      if (rev[day] !== undefined) rev[day] += sessionRev(s);
+    });
+    labels = dates.map(d => new Date(d + 'T12:00:00Z').toLocaleDateString('en-IN', { weekday: 'short', day: 'numeric', month: 'short' }));
+    values = dates.map(d => Math.round(rev[d]));
+    barTitle = 'Daily Revenue';
+    subtitle = `${fmtRangeLabel({ from, to })} · ₹${values.reduce((a,b)=>a+b,0).toLocaleString('en-IN')} total`;
+  }
+
+  if (groupBy === 'week') {
+    const [y, mo] = from.split('-').map(Number);
+    const daysInMonth = new Date(Date.UTC(y, mo, 0)).getUTCDate();
+    const weeks = [];
+    for (let d = 1; d <= daysInMonth; d += 7) {
+      const last = Math.min(d + 6, daysInMonth);
+      weeks.push({ start: d, end: last, label: `${d}–${last}` });
+    }
+    const rev = new Array(weeks.length).fill(0);
+    sessions.forEach(s => {
+      const dayNum = parseInt(new Date(new Date(s.start_time).getTime() + IST_MS).toISOString().split('T')[0].split('-')[2]);
+      const wi = Math.min(Math.floor((dayNum - 1) / 7), weeks.length - 1);
+      rev[wi] += sessionRev(s);
+    });
+    labels = weeks.map(w => w.label);
+    values = rev.map(v => Math.round(v));
+    barTitle = 'Weekly Revenue';
+    const monthName = new Date(from + 'T12:00:00Z').toLocaleDateString('en-IN', { month: 'long', year: 'numeric' });
+    subtitle = `${monthName} · ₹${values.reduce((a,b)=>a+b,0).toLocaleString('en-IN')} total`;
+  }
+
+  if (groupBy === 'month') {
+    const monthKeys = [];
+    let cur = new Date(from + 'T00:00:00Z');
+    const end = new Date(to + 'T00:00:00Z');
+    while (cur <= end) {
+      const key = cur.toISOString().slice(0, 7);
+      if (!monthKeys.includes(key)) monthKeys.push(key);
+      cur = new Date(Date.UTC(cur.getUTCFullYear(), cur.getUTCMonth() + 1, 1));
+    }
+    const rev = Object.fromEntries(monthKeys.map(k => [k, 0]));
+    sessions.forEach(s => {
+      const key = new Date(new Date(s.start_time).getTime() + IST_MS).toISOString().slice(0, 7);
+      if (rev[key] !== undefined) rev[key] += sessionRev(s);
+    });
+    labels = monthKeys.map(k => new Date(k + '-15T12:00:00Z').toLocaleDateString('en-IN', { month: 'short', year: '2-digit' }));
+    values = monthKeys.map(k => Math.round(rev[k]));
+    barTitle = monthKeys.length <= 3 ? 'Quarterly Revenue' : 'Monthly Revenue';
+    subtitle = `${fmtRangeLabel({ from, to })} · ₹${values.reduce((a,b)=>a+b,0).toLocaleString('en-IN')} total`;
+  }
+
+  const titleEl = document.getElementById('chart-bar-title');
+  if (titleEl) titleEl.textContent = barTitle;
+  const labelEl = document.getElementById('chart-week-label');
+  if (labelEl) labelEl.textContent = subtitle;
+
+  const el = document.getElementById('chart-weekly-revenue');
+  if (!el) return;
+
+  state.charts.weekBar = new Chart(el, {
+    type: 'bar',
+    data: {
+      labels,
+      datasets: [{
+        label: 'Revenue',
+        data: values,
+        backgroundColor: CHART_COLORS.bar,
+        borderColor: CHART_COLORS.barBorder,
+        borderWidth: 1.5,
+        borderRadius: 6,
+        borderSkipped: false,
+      }],
+    },
+    options: {
+      responsive: true,
+      maintainAspectRatio: false,
+      plugins: {
+        legend: { display: false },
+        tooltip: { callbacks: { label: ctx => ` ₹${ctx.parsed.y.toLocaleString('en-IN')}` } },
+      },
+      scales: {
+        x: { grid: { color: '#1e1e1e' }, ticks: { color: '#777', font: { size: 11 } } },
+        y: {
+          grid: { color: '#1e1e1e' },
+          ticks: { color: '#777', font: { size: 11 }, callback: v => `₹${v.toLocaleString('en-IN')}` },
+          beginAtZero: true,
+        },
+      },
+    },
+  });
+}
+
 // ── Sessions Tab ─────────────────────────────────────────────────────────────
 async function loadSessionCards() {
   const period = state.analyticsPeriod || '1D';
   const container = document.getElementById('session-cards-container');
   if (!container) return;
-  container.innerHTML = '<div class="no-data" style="padding:32px 0;">Loading…</div>';
 
+  let endpoint;
+  if (period === 'custom') {
+    const from = document.getElementById('custom-from')?.value;
+    const to   = document.getElementById('custom-to')?.value;
+    if (!from || !to) {
+      container.innerHTML = '<div class="no-data">Select a date range and click Apply.</div>';
+      return;
+    }
+    endpoint = `/api/analytics/range?from=${from}&to=${to}`;
+  } else {
+    endpoint = `/api/analytics/range?period=${period}`;
+  }
+
+  container.innerHTML = '<div class="no-data" style="padding:32px 0;">Loading…</div>';
   try {
-    const data = await api('GET', `/api/analytics/range?period=${period}`);
+    const data = await api('GET', endpoint);
     renderSummaryCards(data.summary, period);
     renderSessionCards(data.sessions, period);
   } catch (err) {
@@ -1191,6 +1726,9 @@ function renderSessionCards(sessions, period) {
   const fmtDate = iso => new Date(new Date(iso).getTime() + IST_OFFSET_MS)
     .toLocaleDateString('en-IN', { day: 'numeric', month: 'short' });
 
+  state.sessionMap = {};
+  sessions.forEach(s => { state.sessionMap[s.id] = s; });
+
   const groups = {};
   sessions.forEach(s => {
     const day = new Date(new Date(s.start_time).getTime() + IST_OFFSET_MS).toISOString().split('T')[0];
@@ -1201,9 +1739,8 @@ function renderSessionCards(sessions, period) {
   let html = '';
   Object.entries(groups).sort(([a], [b]) => b.localeCompare(a)).forEach(([day, daySessions]) => {
     const dayRevenue = daySessions.reduce((t, s) => {
-      const disc = s.planned_hours >= 3 ? 0.10 : 0;
-      const fhc  = s.free_half_hour ? s.rate_per_hour * 0.5 : 0;
-      return t + Math.max(0, s.planned_hours * s.rate_per_hour * (1 - disc) - fhc) + (s.order_total || 0);
+      if (s.custom_amount != null) return t + s.custom_amount;
+      return t + calcMixedCost(s.start_time, s.planned_hours, s.machine_type, s.players, s.free_half_hour) + (s.order_total || 0);
     }, 0);
 
     if (period !== '1D') {
@@ -1213,14 +1750,24 @@ function renderSessionCards(sessions, period) {
       </div>`;
     }
 
+    const isSTARK = state.user?.username === 'STARK';
     daySessions.forEach(s => {
       const disc        = s.planned_hours >= 3 ? 0.10 : 0;
-      const fhc         = s.free_half_hour ? s.rate_per_hour * 0.5 : 0;
-      const sessionCost = Math.max(0, s.planned_hours * s.rate_per_hour * (1 - disc) - fhc);
-      const total       = sessionCost + (s.order_total || 0);
+      const sessionCost = calcMixedCost(s.start_time, s.planned_hours, s.machine_type, s.players, s.free_half_hour);
+      const total       = s.custom_amount != null ? s.custom_amount : sessionCost + (s.order_total || 0);
       const isPS5       = s.machine_type === 'PS5';
+      const cash        = s.cash_amount || 0;
+      const online      = s.online_amount || 0;
+      let payBadge = '';
+      if (cash > 0 && online > 0) {
+        payBadge = `<span class="pay-badge split">Split</span>`;
+      } else if (cash > 0) {
+        payBadge = `<span class="pay-badge cash">Cash</span>`;
+      } else if (online > 0) {
+        payBadge = `<span class="pay-badge online">Online</span>`;
+      }
 
-      html += `<div class="session-card">
+      html += `<div class="session-card session-card-clickable" onclick="showSessionDetail(${s.id})">
         <div class="session-card-left">
           <span class="session-card-machine ${isPS5 ? 'ps5' : 'pc'}">${s.machine_id}</span>
           <div class="session-card-info">
@@ -1229,12 +1776,117 @@ function renderSessionCards(sessions, period) {
             <span class="session-card-rate">${s.players || 1} Player${(s.players || 1) > 1 ? 's' : ''}${s.free_half_hour ? ' · ½hr free' : ''}${disc > 0 ? ' · -10%' : ''}</span>
           </div>
         </div>
-        <div class="session-card-total">₹${Math.round(total).toLocaleString('en-IN')}</div>
+        <div class="session-card-right">
+          ${payBadge}
+          <div class="session-card-total">₹${Math.round(total).toLocaleString('en-IN')}</div>
+          ${isSTARK ? `<button class="session-delete-btn" onclick="event.stopPropagation(); deleteSession(${s.id})" title="Delete session">✕</button>` : ''}
+        </div>
       </div>`;
     });
   });
 
   container.innerHTML = html;
+}
+
+function showSessionDetail(sessionId) {
+  const s = state.sessionMap?.[sessionId];
+  if (!s) return;
+
+  const isPS5  = s.machine_type === 'PS5';
+  const disc   = s.planned_hours >= 3 ? 0.10 : 0;
+  const fhc    = s.free_half_hour ? s.rate_per_hour * 0.5 : 0;
+  const sessionCost = Math.max(0, s.planned_hours * s.rate_per_hour * (1 - disc) - fhc);
+  const orderTotal  = s.order_total || 0;
+  const grandTotal  = s.custom_amount != null ? s.custom_amount : sessionCost + orderTotal;
+  const cash   = s.cash_amount  || 0;
+  const online = s.online_amount || 0;
+
+  const fmtTime = iso => new Date(iso).toLocaleTimeString('en-IN', {
+    hour: '2-digit', minute: '2-digit', hour12: true, timeZone: 'Asia/Kolkata',
+  });
+
+  const badge = document.getElementById('session-detail-badge');
+  if (badge) badge.textContent = s.status === 'active' ? 'Active' : 'Completed';
+
+  document.getElementById('session-detail-body').innerHTML = `
+    <div class="invoice-header">
+      <div class="invoice-logo">The Site</div>
+      <div class="invoice-sub">Gaming Cafe · Session Summary</div>
+      <div class="invoice-machine">${isPS5 ? '🎮' : '💻'} ${s.machine_id.replace('PS', 'PlayStation ')}</div>
+      ${s.customer_name?.trim() ? `<div style="color:var(--text-muted);font-size:0.85rem;margin-top:2px;">${s.customer_name.trim()}</div>` : ''}
+      ${isPS5 ? `<div style="color:var(--secondary);font-size:0.82rem;margin-top:4px;">${s.players || 1} Player${(s.players||1)>1?'s':''}</div>` : ''}
+    </div>
+
+    <div class="invoice-section">
+      <h4>Session Details</h4>
+      <table class="invoice-table">
+        <tr><td>Start</td><td>${fmtTime(s.start_time)}</td></tr>
+        ${s.end_time ? `<tr><td>End</td><td>${fmtTime(s.end_time)}</td></tr>` : ''}
+        <tr><td>Duration</td><td>${s.planned_hours}h</td></tr>
+        <tr><td>Rate</td><td>₹${s.rate_per_hour}/hr</td></tr>
+        ${disc > 0 ? `<tr><td style="color:var(--warning)">Discount</td><td style="color:var(--warning)">-${disc*100}% (3h+ offer)</td></tr>` : ''}
+        ${s.free_half_hour ? `<tr><td style="color:var(--warning)">½hr Free</td><td style="color:var(--warning)">-₹${(s.rate_per_hour*0.5).toFixed(0)}</td></tr>` : ''}
+        <tr><td><strong>Gaming Subtotal</strong></td><td><strong>₹${sessionCost.toFixed(0)}</strong></td></tr>
+      </table>
+    </div>
+
+    ${orderTotal > 0 ? `
+    <div class="invoice-section">
+      <h4>Food &amp; Drinks</h4>
+      <table class="invoice-table">
+        <tr><td>F&amp;D Total</td><td>₹${orderTotal.toFixed(0)}</td></tr>
+      </table>
+    </div>` : ''}
+
+    ${s.custom_amount != null ? `
+    <div class="invoice-section">
+      <h4>Custom Amount</h4>
+      <div style="background:rgba(245,158,11,0.08);border:1px solid rgba(245,158,11,0.25);border-radius:var(--radius);padding:10px 12px;font-size:0.85rem;">
+        <div style="color:#f59e0b;font-size:0.75rem;text-transform:uppercase;letter-spacing:0.5px;margin-bottom:4px;">Override applied</div>
+        <div style="display:flex;justify-content:space-between;align-items:center;">
+          <span style="color:var(--text-muted);">Calculated was ₹${(sessionCost + orderTotal).toFixed(0)}</span>
+          <span style="color:#f59e0b;font-weight:700;font-size:1rem;">₹${s.custom_amount.toFixed(0)}</span>
+        </div>
+        ${s.custom_comment ? `<div style="margin-top:6px;color:var(--text-muted);font-size:0.78rem;font-style:italic;">Reason: ${s.custom_comment}</div>` : ''}
+      </div>
+    </div>` : ''}
+
+    <div class="invoice-total">
+      <span>Grand Total</span>
+      <span>₹${grandTotal.toFixed(0)}</span>
+    </div>
+
+    ${(cash > 0 || online > 0) ? `
+    <div style="display:flex;gap:10px;margin-top:10px;">
+      ${cash > 0 ? `
+      <div style="flex:1;background:rgba(34,197,94,0.08);border:1px solid rgba(34,197,94,0.25);border-radius:var(--radius);padding:10px 14px;text-align:center;">
+        <div style="color:#4ade80;font-size:0.7rem;font-weight:700;letter-spacing:0.5px;text-transform:uppercase;margin-bottom:4px;">Cash</div>
+        <div style="color:#4ade80;font-size:1.05rem;font-weight:800;">₹${cash.toFixed(0)}</div>
+      </div>` : ''}
+      ${online > 0 ? `
+      <div style="flex:1;background:rgba(99,102,241,0.08);border:1px solid rgba(99,102,241,0.25);border-radius:var(--radius);padding:10px 14px;text-align:center;">
+        <div style="color:#818cf8;font-size:0.7rem;font-weight:700;letter-spacing:0.5px;text-transform:uppercase;margin-bottom:4px;">Online</div>
+        <div style="color:#818cf8;font-size:1.05rem;font-weight:800;">₹${online.toFixed(0)}</div>
+      </div>` : ''}
+    </div>` : ''}
+
+    <div class="invoice-actions">
+      <button class="btn-secondary" style="flex:1" onclick="closeModal('session-detail-modal')">Close</button>
+    </div>
+  `;
+
+  document.getElementById('session-detail-modal').classList.add('active');
+}
+
+async function deleteSession(sessionId) {
+  if (!confirm('Permanently delete this session from the database? This cannot be undone.')) return;
+  try {
+    await api('DELETE', `/api/sessions/${sessionId}`);
+    showToast('Session deleted', 'success');
+    loadSessionCards();
+  } catch (err) {
+    showToast(err.message, 'error');
+  }
 }
 
 // ── Graph Tab ────────────────────────────────────────────────────────────────
@@ -1276,91 +1928,107 @@ function renderSummaryCards(summary, period) {
 
 function renderOccupancyGrid(sessions, machines, date) {
   const container = document.getElementById('occupancy-grid');
+  if (!container) return;
 
-  if (!sessions.length) {
-    container.innerHTML = '<div class="no-data">No sessions recorded for this date.</div>';
-    return;
-  }
+  const OPEN_HOUR  = 5;
+  const CLOSE_HOUR = 25.5;
+  const TOTAL_MINS = (CLOSE_HOUR - OPEN_HOUR) * 60;
+  const HOUR_H     = 64;
+  const TOTAL_H    = Math.round(TOTAL_MINS / 60 * HOUR_H);
 
-  // Time slots: 5:00 AM to 1:30 AM next day IST = 20.5 hours × 2 = 41 half-hour slots
-  const OPEN_HOUR  = 5;     // 5 AM IST
-  const CLOSE_HOUR = 25.5;  // 1:30 AM next day IST
-  const SLOTS      = (CLOSE_HOUR - OPEN_HOUR) * 2; // 41
-
-  // Build occupancy map: machine_id → Set<slot_index>
-  const occupancy = {};
-  machines.forEach(m => { occupancy[m.id] = new Set(); });
-
-  // dayBase = 5:00 AM IST on the selected date (stored as UTC, IST = UTC+5:30)
   const IST_OFFSET_MS = 5.5 * 60 * 60 * 1000;
   const dayBase = new Date(date + 'T00:00:00Z');
   dayBase.setTime(dayBase.getTime() - IST_OFFSET_MS + OPEN_HOUR * 3600000);
 
-  sessions.forEach(s => {
-    const startMs = new Date(s.start_time).getTime();
-    const endMs   = s.end_time
-      ? new Date(s.end_time).getTime()
-      : startMs + s.planned_hours * 3600000;
-
-    const startSlot = Math.floor((startMs - dayBase.getTime()) / (30 * 60000));
-    const endSlot   = Math.ceil((endMs   - dayBase.getTime()) / (30 * 60000));
-
-    for (let slot = Math.max(0, startSlot); slot < Math.min(SLOTS, endSlot); slot++) {
-      if (occupancy[s.machine_id]) occupancy[s.machine_id].add(slot);
-    }
-  });
-
-  // Determine machine type for coloring
-  const machineTypeMap = {};
-  machines.forEach(m => { machineTypeMap[m.id] = m.type; });
-
-  // Build table
-  const machineIds = machines.map(m => m.id);
-  let html = `
-    <div class="occ-grid-wrap">
-      <div class="occ-legend">
-        <div class="occ-legend-item"><div class="occ-legend-box pc"></div>PC Active</div>
-        <div class="occ-legend-item"><div class="occ-legend-box ps5"></div>PS5 Active</div>
-        <div class="occ-legend-item"><div class="occ-legend-box av"></div>Available</div>
-      </div>
-      <table class="occ-table">
-        <thead>
-          <tr>
-            <th style="width:60px">Time</th>
-            ${machineIds.map(id => `<th>${id.replace('PS', 'PS ')}</th>`).join('')}
-          </tr>
-        </thead>
-        <tbody>
-  `;
-
-  for (let slot = 0; slot < SLOTS; slot++) {
-    const totalMinutes = OPEN_HOUR * 60 + slot * 30;
-    const displayHour  = totalMinutes >= 1440
-      ? Math.floor((totalMinutes - 1440) / 60)
-      : Math.floor(totalMinutes / 60);
-    const displayMin   = totalMinutes % 60;
-    const ampm         = totalMinutes >= 1440
-      ? (totalMinutes - 1440 < 720 ? 'AM' : 'PM')
-      : (totalMinutes < 720 ? 'AM' : 'PM');
-    const h12          = displayHour === 0 ? 12 : displayHour > 12 ? displayHour - 12 : displayHour;
-    const timeLabel    = displayMin === 0
-      ? `${h12}${ampm}`
-      : `${h12}:${String(displayMin).padStart(2,'0')}`;
-
-    const isHour = slot % 2 === 0;
-    html += `<tr${isHour ? '' : ' style="opacity:0.6"'}>
-      <td class="time-label">${timeLabel}</td>
-      ${machineIds.map(id => {
-        const isOcc = occupancy[id]?.has(slot);
-        const type  = machineTypeMap[id];
-        const cls   = isOcc ? (type === 'PS5' ? 'occ-ps5' : 'occ-pc') : '';
-        return `<td><div class="occ-cell ${cls}"></div></td>`;
-      }).join('')}
-    </tr>`;
+  const todayIST = new Date(Date.now() + IST_OFFSET_MS).toISOString().split('T')[0];
+  let nowTopPx = -1;
+  if (date === todayIST) {
+    const minsFromOpen = (Date.now() - dayBase.getTime()) / 60000;
+    if (minsFromOpen >= 0 && minsFromOpen <= TOTAL_MINS) nowTopPx = minsFromOpen / 60 * HOUR_H;
   }
 
-  html += `</tbody></table></div>`;
-  container.innerHTML = html;
+  const machineTypeMap = {};
+  machines.forEach(m => { machineTypeMap[m.id] = m.type; });
+  const machineIds = machines.map(m => m.id);
+
+  const byMachine = {};
+  machineIds.forEach(id => { byMachine[id] = []; });
+  sessions.forEach(s => { if (byMachine[s.machine_id]) byMachine[s.machine_id].push(s); });
+
+  const fmtMin = totalMin => {
+    const h    = Math.floor(totalMin / 60) % 24;
+    const m    = totalMin % 60;
+    const ampm = h < 12 ? 'AM' : 'PM';
+    const h12  = h === 0 ? 12 : h > 12 ? h - 12 : h;
+    return `${h12}:${String(m).padStart(2, '0')} ${ampm}`;
+  };
+
+  let hourLabelsHtml = '';
+  let hourLinesHtml  = '';
+  for (let i = 0; i <= Math.ceil(CLOSE_HOUR - OPEN_HOUR); i++) {
+    const topPx   = i * HOUR_H;
+    const absHour = OPEN_HOUR + i;
+    const dh      = absHour >= 24 ? absHour - 24 : absHour;
+    const ampm    = dh < 12 ? 'AM' : 'PM';
+    const h12     = dh === 0 ? 12 : dh > 12 ? dh - 12 : dh;
+    hourLabelsHtml += `<div class="cal-hour-label" style="top:${topPx}px">${h12} ${ampm}</div>`;
+    hourLinesHtml  += `<div class="cal-hr-line" style="top:${topPx}px"></div>`;
+    if (i < Math.ceil(CLOSE_HOUR - OPEN_HOUR))
+      hourLinesHtml += `<div class="cal-half-line" style="top:${topPx + HOUR_H / 2}px"></div>`;
+  }
+
+  const machineColsHtml = machineIds.map(id => {
+    const type = machineTypeMap[id];
+    const cls  = type === 'PS5' ? 'cal-event-ps5' : 'cal-event-pc';
+    const events = (byMachine[id] || []).map(s => {
+      const startMs  = new Date(s.start_time).getTime();
+      const endMs    = s.end_time ? new Date(s.end_time).getTime() : startMs + s.planned_hours * 3600000;
+      const topPx    = Math.max(0, (startMs - dayBase.getTime()) / 60000 / 60 * HOUR_H);
+      const heightPx = Math.max(24, (endMs - startMs) / 60000 / 60 * HOUR_H - 2);
+      const startMin = OPEN_HOUR * 60 + Math.round((startMs - dayBase.getTime()) / 60000);
+      const endMin   = OPEN_HOUR * 60 + Math.round((endMs   - dayBase.getTime()) / 60000);
+      const name     = s.customer_name || 'Walk-in';
+      const players  = type === 'PS5' && s.players > 1 ? ` · ${s.players}P` : '';
+      return `<div class="cal-event ${cls}" style="top:${topPx.toFixed(1)}px;height:${heightPx.toFixed(1)}px;">
+        <div class="cal-event-name">${name}${players}</div>
+        <div class="cal-event-time">${fmtMin(startMin)} – ${fmtMin(endMin)}</div>
+      </div>`;
+    }).join('');
+    return `<div class="cal-col">${events}</div>`;
+  }).join('');
+
+  const machineHeadersHtml = machineIds.map(id => {
+    const type = machineTypeMap[id];
+    return `<div class="cal-col-header ${type === 'PS5' ? 'ps5' : 'pc'}">${id.replace('PS', 'PS ')}</div>`;
+  }).join('');
+
+  const nowLineHtml = nowTopPx >= 0
+    ? `<div class="cal-now-line" style="top:${nowTopPx.toFixed(1)}px"><div class="cal-now-dot"></div></div>`
+    : '';
+
+  container.innerHTML = `
+    <div class="cal-wrap">
+      <div class="cal-header-row">
+        <div class="cal-gutter"></div>
+        <div class="cal-machine-headers">${machineHeadersHtml}</div>
+      </div>
+      <div class="cal-scroll-body">
+        <div class="cal-body" style="height:${TOTAL_H}px;">
+          <div class="cal-time-axis">${hourLabelsHtml}</div>
+          <div class="cal-content">
+            <div class="cal-grid-lines">${hourLinesHtml}</div>
+            <div class="cal-cols">${machineColsHtml}</div>
+            ${nowLineHtml}
+          </div>
+        </div>
+      </div>
+    </div>
+  `;
+
+  const scrollBody = container.querySelector('.cal-scroll-body');
+  if (scrollBody) {
+    scrollBody.scrollTop = nowTopPx > 0 ? Math.max(0, nowTopPx - 120) : (9 - OPEN_HOUR) * HOUR_H;
+  }
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════

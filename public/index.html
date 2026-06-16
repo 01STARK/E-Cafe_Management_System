@@ -313,6 +313,7 @@
       <!-- Tab Navigation -->
       <div class="analytics-tabs">
         <button class="analytics-tab active" id="tab-sessions" onclick="switchAnalyticsTab('sessions')">Sessions</button>
+        <button class="analytics-tab" id="tab-charts" onclick="switchAnalyticsTab('charts')">Charts</button>
         <button class="analytics-tab" id="tab-graph" onclick="switchAnalyticsTab('graph')">Graph</button>
       </div>
 
@@ -323,8 +324,60 @@
           <button class="period-btn" data-period="1W" onclick="setAnalyticsPeriod('1W')">1W</button>
           <button class="period-btn" data-period="1M" onclick="setAnalyticsPeriod('1M')">1M</button>
           <button class="period-btn" data-period="1Y" onclick="setAnalyticsPeriod('1Y')">1Y</button>
+          <button class="period-btn" data-period="custom" onclick="setAnalyticsPeriod('custom')">Custom</button>
+        </div>
+        <div id="custom-date-range" class="custom-date-range" style="display:none;">
+          <label class="custom-date-label">From <input type="date" id="custom-from" /></label>
+          <label class="custom-date-label">To <input type="date" id="custom-to" /></label>
+          <button class="btn-apply-range" onclick="loadSessionCards()">Apply</button>
         </div>
         <div id="session-cards-container"></div>
+      </div>
+
+      <!-- Charts Pane -->
+      <div id="analytics-pane-charts" class="analytics-pane">
+        <div class="period-toggle">
+          <button class="chart-period-btn active" data-period="1D" onclick="setChartPeriod('1D')">1D</button>
+          <button class="chart-period-btn" data-period="1W" onclick="setChartPeriod('1W')">1W</button>
+          <button class="chart-period-btn" data-period="1M" onclick="setChartPeriod('1M')">1M</button>
+          <button class="chart-period-btn" data-period="1Y" onclick="setChartPeriod('1Y')">1Y</button>
+          <button class="chart-period-btn" data-period="custom" onclick="setChartPeriod('custom')">Custom</button>
+        </div>
+        <div id="chart-custom-range" class="custom-date-range" style="display:none;">
+          <input type="date" id="chart-from" onchange="loadCharts()" />
+          <span>to</span>
+          <input type="date" id="chart-to" onchange="loadCharts()" />
+        </div>
+        <div class="charts-grid">
+          <div class="chart-card">
+            <div class="chart-card-header">
+              <div class="chart-title">Revenue Breakdown</div>
+              <div class="chart-subtitle" id="chart-rev-subtitle">Last 7 days · PC vs PS5 vs F&D</div>
+            </div>
+            <div class="chart-canvas-wrap"><canvas id="chart-revenue-breakdown"></canvas></div>
+          </div>
+          <div class="chart-card">
+            <div class="chart-card-header">
+              <div class="chart-title">Customer Split</div>
+              <div class="chart-subtitle" id="chart-cust-subtitle">Regular vs New</div>
+            </div>
+            <div class="chart-canvas-wrap"><canvas id="chart-customer-split"></canvas></div>
+          </div>
+          <div class="chart-card">
+            <div class="chart-card-header">
+              <div class="chart-title">Payment Split</div>
+              <div class="chart-subtitle" id="chart-payment-subtitle">This week · Cash vs Online</div>
+            </div>
+            <div class="chart-canvas-wrap"><canvas id="chart-payment-split"></canvas></div>
+          </div>
+          <div class="chart-card chart-card-wide">
+            <div class="chart-card-header">
+              <div class="chart-title" id="chart-bar-title">Revenue</div>
+              <div class="chart-subtitle" id="chart-week-label">Select a period above</div>
+            </div>
+            <div class="chart-canvas-wrap chart-canvas-wrap-bar"><canvas id="chart-weekly-revenue"></canvas></div>
+          </div>
+        </div>
       </div>
 
       <!-- Graph Pane -->
@@ -379,6 +432,24 @@
 </div>
 
 <!-- ═══════════════════════════════════════════════════════════════════════════
+     SESSION DETAIL MODAL
+════════════════════════════════════════════════════════════════════════════ -->
+<div id="session-detail-modal" class="modal-overlay" onclick="handleModalOverlayClick(event)">
+  <div class="modal-box modal-box-wide" role="dialog" aria-modal="true">
+    <div class="modal-header">
+      <div>
+        <h3>Session Summary</h3>
+        <span class="modal-badge" id="session-detail-badge"></span>
+      </div>
+      <button class="modal-close" onclick="closeModal('session-detail-modal')" aria-label="Close">✕</button>
+    </div>
+    <div class="modal-body" id="session-detail-body">
+      <!-- Injected by JS -->
+    </div>
+  </div>
+</div>
+
+<!-- ═══════════════════════════════════════════════════════════════════════════
      PAYMENT MODAL
 ════════════════════════════════════════════════════════════════════════════ -->
 <div id="payment-modal" class="modal-overlay" onclick="handleModalOverlayClick(event)">
@@ -402,6 +473,10 @@
           <input type="number" id="pay-online" placeholder="Enter amount" min="0" oninput="onPaymentInput('online')" />
         </div>
       </div>
+      <div id="change-row" class="payment-change-row" style="display:none;">
+        <span>Change</span>
+        <span id="change-val"></span>
+      </div>
       <button class="btn-checkout" id="payment-confirm-btn" onclick="confirmPayment()">
         End Session
       </button>
@@ -412,6 +487,7 @@
 <!-- Toast -->
 <div id="toast-container"></div>
 
+<script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.2/dist/chart.umd.min.js"></script>
 <script src="/js/app.js"></script>
 </body>
 </html>
