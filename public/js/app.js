@@ -1191,7 +1191,7 @@ function showInvoice(inv) {
     </div>
 
     <div class="invoice-section">
-      <h4>Food &amp; Drinks</h4>
+      <h4>Food &amp; Beverages</h4>
       ${ordersHtml}
       ${inv.order_total > 0 ? `
         <div style="display:flex;justify-content:space-between;margin-top:8px;font-size:0.88rem;font-weight:700;">
@@ -1446,12 +1446,12 @@ function renderRevenuePie(sessions, range) {
   if (total === 0) { el.closest('.chart-canvas-wrap').innerHTML = '<div class="chart-loading">No data for this period</div>'; return; }
 
   const sub = document.getElementById('chart-rev-subtitle');
-  if (sub) sub.textContent = `${fmtRangeLabel(range)} · PC ₹${Math.round(pcRev).toLocaleString('en-IN')} · PS5 ₹${Math.round(ps5Rev).toLocaleString('en-IN')} · F&D ₹${Math.round(fndRev).toLocaleString('en-IN')}`;
+  if (sub) sub.textContent = `${fmtRangeLabel(range)} · PC ₹${Math.round(pcRev).toLocaleString('en-IN')} · PS5 ₹${Math.round(ps5Rev).toLocaleString('en-IN')} · F&B ₹${Math.round(fndRev).toLocaleString('en-IN')}`;
 
   state.charts.revPie = new Chart(el, {
     type: 'doughnut',
     data: {
-      labels: ['PC', 'PlayStation', 'Food & Drinks'],
+      labels: ['PC', 'PlayStation', 'Food & Beverages'],
       datasets: [{
         data: [Math.round(pcRev), Math.round(ps5Rev), Math.round(fndRev)],
         backgroundColor: [CHART_COLORS.pc, CHART_COLORS.ps5, CHART_COLORS.fnd],
@@ -1832,7 +1832,7 @@ function showSessionDetail(sessionId) {
 
     ${orderTotal > 0 ? `
     <div class="invoice-section">
-      <h4>Food &amp; Drinks</h4>
+      <h4>Food &amp; Beverages</h4>
       <table class="invoice-table">
         <tr><td>F&amp;D Total</td><td>₹${orderTotal.toFixed(0)}</td></tr>
       </table>
