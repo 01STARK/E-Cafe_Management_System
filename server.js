@@ -34,18 +34,12 @@ const RATES = {
 
 const HAPPY_HOUR_RATE     = parseFloat(process.env.HAPPY_HOUR_RATE)     || 49;
 const PS5_HAPPY_HOUR_RATE = parseFloat(process.env.PS5_HAPPY_HOUR_RATE) || 59;
-// Happy hours: strictly after 9:59 AM and strictly before 4:01 PM IST
-function isHappyHour() {
-  const now = nowIST();
-  const mins = now.getUTCHours() * 60 + now.getUTCMinutes();
-  return mins > 9 * 60 + 59 && mins < 16 * 60 + 1;
-}
-
-// Check happy hour for a specific UTC ISO timestamp
-function isHappyHourAt(isoString) {
-  const ms   = new Date(isoString).getTime() + IST_OFFSET_MS;
+// Happy hours: strictly after 9:59 AM and strictly before 2:01 PM IST.
+// Pass a UTC ISO timestamp to check a specific moment; omit it to check now.
+function isHappyHour(isoString) {
+  const ms   = (isoString ? new Date(isoString).getTime() : Date.now()) + IST_OFFSET_MS;
   const mins = Math.floor(ms / 60000) % (24 * 60);
-  return mins > 9 * 60 + 59 && mins < 16 * 60;
+  return mins > 9 * 60 + 59 && mins < 14 * 60 + 1;
 }
 
 // Per-hour billing: each 1h slot is charged based on when it STARTS.
@@ -54,7 +48,7 @@ function mixedSessionCost(startTimeISO, plannedHours, machineType, playerCount, 
   const players = playerCount || 1;
   function rateAt(i) {
     const slotISO = new Date(new Date(startTimeISO).getTime() + i * 3600000).toISOString();
-    const hh = isHappyHourAt(slotISO);
+    const hh = isHappyHour(slotISO);
     if (machineType === 'PS5') return hh ? PS5_HAPPY_HOUR_RATE * players : (PS5_RATES[players] || PS5_RATES[1]);
     return hh ? HAPPY_HOUR_RATE : RATES.PC;
   }
@@ -358,7 +352,7 @@ function buildDailyReportHtml(dateStr, sessions) {
         <td style="color:#A6FF00;font-size:12px;font-weight:600;text-align:right;padding:4px 0;">₹${Math.round(totalGaming).toLocaleString('en-IN')}</td>
       </tr>
       <tr>
-        <td style="color:#888;font-size:12px;padding:4px 0;">Food &amp; Drinks</td>
+        <td style="color:#888;font-size:12px;padding:4px 0;">Food &amp; Beverages</td>
         <td style="color:#bb88ff;font-size:12px;font-weight:600;text-align:right;padding:4px 0;">₹${Math.round(totalOrderRevenue).toLocaleString('en-IN')}</td>
       </tr>
       <tr><td colspan="2" style="border-top:1px solid #222;padding:0;height:8px;"></td></tr>
@@ -870,7 +864,7 @@ app.post('/api/sessions/:id/extend', auth, (req, res) => {
 
   const slotStartMs  = new Date(session.start_time).getTime() + session.planned_hours * 3600000;
   const slotHourRate = (() => {
-    const hh      = isHappyHourAt(new Date(slotStartMs).toISOString());
+    const hh      = isHappyHour(new Date(slotStartMs).toISOString());
     const players = session.players || 1;
     if (session.machine_type === 'PS5') return hh ? PS5_HAPPY_HOUR_RATE * players : (PS5_RATES[players] || PS5_RATES[1]);
     return hh ? HAPPY_HOUR_RATE : RATES.PC;
@@ -905,7 +899,7 @@ app.post('/api/sessions/:id/checkout', auth, (req, res) => {
   const roundedBillable = session.planned_hours - extCount * 0.25;
   const discount        = roundedBillable >= 3 ? 0.10 : 0;
   const sessionCost     = mixedSessionCost(session.start_time, roundedBillable, session.machine_type, session.players || 1, session.free_half_hour);
-  const firstHourRate   = isHappyHourAt(session.start_time)
+  const firstHourRate   = isHappyHour(session.start_time)
     ? (session.machine_type === 'PS5' ? PS5_HAPPY_HOUR_RATE * (session.players || 1) : HAPPY_HOUR_RATE)
     : (session.machine_type === 'PS5' ? (PS5_RATES[session.players || 1] || PS5_RATES[1]) : RATES.PC);
   const freeHalfCredit  = session.free_half_hour ? firstHourRate * 0.5 : 0;
