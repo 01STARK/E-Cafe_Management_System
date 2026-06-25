@@ -1151,10 +1151,20 @@ function showInvoice(inv) {
   const end    = new Date(inv.end_time);
   const isPS5  = inv.machine_type === 'PS5';
 
-  const ordersHtml = inv.orders.length > 0
+  const extOrders = inv.orders.filter(o => o.item_type === 'extension');
+  const fndOrders = inv.orders.filter(o => o.item_type !== 'extension');
+
+  const extHtml = extOrders.map(o => `
+    <tr>
+      <td>${o.item_name}</td>
+      <td>₹${(o.quantity * o.unit_price).toFixed(0)}</td>
+    </tr>
+  `).join('');
+
+  const ordersHtml = fndOrders.length > 0
     ? `
       <table class="invoice-table">
-        ${inv.orders.map(o => `
+        ${fndOrders.map(o => `
           <tr>
             <td>${o.item_name}</td>
             <td style="color:var(--text-muted);text-align:center">×${o.quantity}</td>
@@ -1183,6 +1193,7 @@ function showInvoice(inv) {
         <tr><td>Billed Hours</td><td>${fmtHrs(inv.billable_hours)}</td></tr>
         <tr><td>Rate</td><td>₹${inv.rate_per_hour}/hr</td></tr>
         ${inv.discount_pct > 0 ? `<tr><td style="color:var(--warning)">Discount</td><td style="color:var(--warning)">-${inv.discount_pct}% (3h+ offer)</td></tr>` : ''}
+        ${extHtml}
         <tr>
           <td><strong>Session Subtotal</strong></td>
           <td><strong>₹${inv.session_cost.toFixed(0)}</strong></td>
@@ -1428,7 +1439,17 @@ function fmtRangeLabel(range) {
   return `${fmt(range.from)} – ${fmt(range.to)}`;
 }
 
+// Pie charts replace their <canvas> with a "no data" message when a period is empty.
+// Restore the canvas before every render so a later period with data isn't stuck showing that message.
+function resetChartCanvas(wrapId, canvasId) {
+  const wrap = document.getElementById(wrapId);
+  if (wrap && !document.getElementById(canvasId)) {
+    wrap.innerHTML = `<canvas id="${canvasId}"></canvas>`;
+  }
+}
+
 function renderRevenuePie(sessions, range) {
+  resetChartCanvas('wrap-chart-revenue-breakdown', 'chart-revenue-breakdown');
   destroyChart('revPie');
   let pcRev = 0, ps5Rev = 0, fndRev = 0;
   sessions.forEach(s => {
@@ -1477,6 +1498,7 @@ function renderRevenuePie(sessions, range) {
 }
 
 function renderCustomerPie(sessions, range) {
+  resetChartCanvas('wrap-chart-customer-split', 'chart-customer-split');
   destroyChart('custPie');
   const counts = {};
   sessions.forEach(s => {
@@ -1526,6 +1548,7 @@ function renderCustomerPie(sessions, range) {
 }
 
 function renderPaymentPie(sessions, range) {
+  resetChartCanvas('wrap-chart-payment-split', 'chart-payment-split');
   destroyChart('payPie');
   let cash = 0, online = 0;
   sessions.forEach(s => {
@@ -1834,7 +1857,7 @@ function showSessionDetail(sessionId) {
     <div class="invoice-section">
       <h4>Food &amp; Beverages</h4>
       <table class="invoice-table">
-        <tr><td>F&amp;D Total</td><td>₹${orderTotal.toFixed(0)}</td></tr>
+        <tr><td>F&amp;B Total</td><td>₹${orderTotal.toFixed(0)}</td></tr>
       </table>
     </div>` : ''}
 
