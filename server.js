@@ -227,7 +227,7 @@ function getDailyReportData(dateStr, fromTime = null, toTime = null, toDateStr =
     s.billable_hours   = s.planned_hours;
     s.discount_pct     = s.billable_hours >= 3 ? 10 : 0;
     s.session_cost     = mixedSessionCost(s.start_time, s.billable_hours, s.machine_type, s.players || 1, s.free_half_hour);
-    s.order_total      = s.orders.reduce((t, o) => t + o.quantity * o.unit_price, 0);
+    s.order_total      = s.orders.filter(o => o.item_type !== 'extension').reduce((t, o) => t + o.quantity * o.unit_price, 0);
     s.grand_total      = s.custom_amount != null ? s.custom_amount : s.session_cost + s.order_total;
     s.end_display      = s.end_time || new Date(endMs).toISOString();
   });
@@ -271,7 +271,7 @@ function buildDailyReportHtml(dateStr, sessions) {
           ? '<span style="color:#ffaa00;font-size:10px;margin-left:4px;">(active)</span>'
           : '';
 
-        const orderRows = s.orders.map(o => `
+        const orderRows = s.orders.filter(o => o.item_type !== 'extension').map(o => `
           <tr>
             <td style="padding:3px 8px 3px 24px;color:#666;font-size:11px;" colspan="2">↳ ${o.item_name} × ${o.quantity}</td>
             <td style="padding:3px 8px;color:#666;font-size:11px;text-align:right;">₹${(o.quantity * o.unit_price).toFixed(0)}</td>
@@ -405,7 +405,7 @@ function buildDailyReportHtml(dateStr, sessions) {
   ${(() => {
     const itemTotals = {};
     sessions.forEach(s => {
-      (s.orders || []).forEach(o => {
+      (s.orders || []).filter(o => o.item_type !== 'extension').forEach(o => {
         if (!itemTotals[o.item_name]) itemTotals[o.item_name] = { qty: 0, revenue: 0, type: o.item_type };
         itemTotals[o.item_name].qty     += o.quantity;
         itemTotals[o.item_name].revenue += o.quantity * o.unit_price;
@@ -903,7 +903,7 @@ app.post('/api/sessions/:id/checkout', auth, (req, res) => {
     ? (session.machine_type === 'PS5' ? PS5_HAPPY_HOUR_RATE * (session.players || 1) : HAPPY_HOUR_RATE)
     : (session.machine_type === 'PS5' ? (PS5_RATES[session.players || 1] || PS5_RATES[1]) : RATES.PC);
   const freeHalfCredit  = session.free_half_hour ? firstHourRate * 0.5 : 0;
-  const orderTotal      = orders.reduce((s, o) => s + o.quantity * o.unit_price, 0);
+  const orderTotal      = orders.filter(o => o.item_type !== 'extension').reduce((s, o) => s + o.quantity * o.unit_price, 0);
   const hasCustom       = req.body?.custom_amount != null && req.body?.custom_amount !== '';
   const customAmount    = hasCustom ? parseFloat(req.body.custom_amount) : null;
   const customComment   = req.body?.custom_comment || '';
@@ -964,7 +964,7 @@ app.get('/api/analytics', auth, ownerOnly, (req, res) => {
       s.players, s.start_time, s.planned_hours, s.end_time, s.status, s.rate_per_hour,
       s.free_half_hour, s.cash_amount, s.online_amount,
       COALESCE((
-        SELECT SUM(o.quantity * o.unit_price) FROM orders o WHERE o.session_id = s.id
+        SELECT SUM(o.quantity * o.unit_price) FROM orders o WHERE o.session_id = s.id AND o.item_type != 'extension'
       ), 0) AS order_total
     FROM sessions s
     WHERE date(datetime(s.start_time, '+5 hours', '30 minutes')) = ?
@@ -1013,7 +1013,7 @@ app.get('/api/analytics/range', auth, ownerOnly, (req, res) => {
       s.players, s.start_time, s.end_time, s.planned_hours, s.status,
       s.rate_per_hour, s.free_half_hour, s.cash_amount, s.online_amount, s.custom_amount, s.custom_comment,
       COALESCE((
-        SELECT SUM(o.quantity * o.unit_price) FROM orders o WHERE o.session_id = s.id
+        SELECT SUM(o.quantity * o.unit_price) FROM orders o WHERE o.session_id = s.id AND o.item_type != 'extension'
       ), 0) AS order_total
     FROM sessions s
     WHERE date(datetime(s.start_time, '+5 hours', '30 minutes')) BETWEEN ? AND ?
@@ -1051,7 +1051,7 @@ async function sendRangeReport(period, customFrom, customTo) {
       s.rate_per_hour, s.free_half_hour, s.cash_amount, s.online_amount,
       s.custom_amount, s.custom_comment,
       COALESCE((
-        SELECT SUM(o.quantity * o.unit_price) FROM orders o WHERE o.session_id = s.id
+        SELECT SUM(o.quantity * o.unit_price) FROM orders o WHERE o.session_id = s.id AND o.item_type != 'extension'
       ), 0) AS order_total
     FROM sessions s
     WHERE date(datetime(s.start_time, '+5 hours', '30 minutes')) BETWEEN ? AND ?
